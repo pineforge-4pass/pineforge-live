@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS order_states(client_id TEXT NOT NULL, state_json TEXT
 CREATE TABLE IF NOT EXISTS order_ids(client_id TEXT PRIMARY KEY, venue_order_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS fills(venue_trade_id TEXT PRIMARY KEY, client_id TEXT, venue_order_id TEXT, ts INTEGER, side TEXT,
   qty REAL, price REAL, fee REAL, cause TEXT, target_bar_index INTEGER, cls TEXT, created_ms INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS reconciles(id INTEGER PRIMARY KEY AUTOINCREMENT, epoch_hash TEXT NOT NULL, bar_index INTEGER, cause TEXT,
+CREATE TABLE IF NOT EXISTS reconciles(id INTEGER PRIMARY KEY AUTOINCREMENT, epoch_hash TEXT NOT NULL, bar_index INTEGER, bar_ts_open INTEGER NOT NULL, cause TEXT,
   detail_json TEXT, created_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS incidents(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, detail_json TEXT, created_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS stops(id INTEGER PRIMARY KEY AUTOINCREMENT, level TEXT NOT NULL, disposition TEXT NOT NULL, cause TEXT NOT NULL,
@@ -50,15 +50,30 @@ CREATE TABLE IF NOT EXISTS stops(id INTEGER PRIMARY KEY AUTOINCREMENT, level TEX
 CREATE TABLE IF NOT EXISTS checks(fencing_token INTEGER PRIMARY KEY, lease_expiry_ms INTEGER NOT NULL, row_json TEXT, created_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS ticks(seq INTEGER PRIMARY KEY, ts INTEGER NOT NULL, price REAL NOT NULL, qty REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS schema_meta(version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS execution_requests(
+  client_id TEXT PRIMARY KEY, epoch_hash TEXT NOT NULL, logical_key TEXT NOT NULL,
+  payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL,
+  state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_attempt_ms INTEGER,
+  created_ms INTEGER NOT NULL, UNIQUE(epoch_hash, logical_key));
+CREATE TABLE IF NOT EXISTS execution_notices(
+  epoch_hash TEXT NOT NULL, slot_key TEXT NOT NULL, payload_json TEXT NOT NULL,
+  payload_hash TEXT NOT NULL, state TEXT NOT NULL, released_client_id TEXT,
+  PRIMARY KEY(epoch_hash, slot_key));
+CREATE TABLE IF NOT EXISTS execution_receipts(
+  trade_key TEXT PRIMARY KEY, epoch_hash TEXT NOT NULL, payload_json TEXT NOT NULL,
+  payload_hash TEXT NOT NULL, consumed_bar INTEGER);
+CREATE TABLE IF NOT EXISTS execution_cursors(
+  epoch_hash TEXT NOT NULL, stream TEXT NOT NULL, cursor TEXT NOT NULL,
+  PRIMARY KEY(epoch_hash, stream));
+CREATE TABLE IF NOT EXISTS execution_basis(
+  epoch_hash TEXT PRIMARY KEY, anchor_qty REAL NOT NULL, anchor_watermark INTEGER NOT NULL);
 """
 CHECKSUMMED = ("settlements", "actions", "evaluations", "bars")
 
-# R4: the schema_meta row Journal.open() writes on a fresh create and
-# checks on every reopen; bump this only alongside a real DDL migration.
-# Task 0 adds `settlements.trades_sha256`, but no journal built under
-# version 1 has ever been released, so there is nothing to migrate --
-# SCHEMA_VERSION stays at 1 rather than bumping for this column.
-SCHEMA_VERSION = 1
+# Version 2 adds the settled bar timestamp to reconciles. Old pre-alpha
+# journals are preserved and refused before DDL or WAL changes; they must
+# not silently acquire fabricated trading-day provenance.
+SCHEMA_VERSION = 2
 
 # Columns excluded from a table's checksum domain even though they are part
 # of the stored row (finding 2/4): `evaluations.id` is AUTOINCREMENT and not

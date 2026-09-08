@@ -897,14 +897,11 @@ def test_the_mirror_early_day_tally_survives_a_restart(test_so, test_feed, tmp_p
     NEW-B: and it has to survive the reborn core's FIRST settle. `_day`
     started `None`, so `_roll_day` read "the day changed" on that settle and
     zeroed both tallies -- the restore was dead code and the cap exactly as
-    launderable as before. The clock is frozen inside bar 2001's own UTC day
-    here because the restore joins the journal's wall-clock `created_ms`
-    while `_roll_day` rolls on the settled bar's `ts_open`, and the corpus
-    tape is 2020 (see `_restore_day_counters` on the two clocks)."""
+    launderable as before. The tape's bar day differs from the journal's
+    wall-clock day: restart must restore the former without freezing time."""
     import pineforge_live.core.live as live
     c, j = _core(test_so, tmp_path)
     bars = load_bars(test_feed, 2300)
-    monkeypatch.setattr(live.time, "time", lambda: bars[2001].ts_open / 1000.0)
     c.seed(bars[:2000])
     early = ClassifiedFill(FillClass.MIRROR_EARLY, None,
                            VenueFill("x", "EXIT", T.Side.SELL, 1.0, bars[2000].c, 2000, T.FillCause.OURS, "c"), 1.0, "")

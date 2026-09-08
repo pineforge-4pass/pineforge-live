@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, os, sqlite3, sys, time
+import contextlib, hashlib, json, os, sqlite3, sys, time
 from pathlib import Path
 from typing import Any, Callable
 from pineforge_live import types as T
@@ -133,6 +133,15 @@ class Journal:
                     raise JournalFault(
                         f"journal {path} has no schema_meta table (pre-schema-versioning journal; "
                         "v1 journals are not migrated)"
+                    )
+                versions = con.execute("SELECT version FROM schema_meta").fetchall()
+                if not versions:
+                    raise JournalFault(f"journal {path} has no schema_meta row; older journals are not migrated")
+                if len(versions) != 1 or versions[0][0] != SCHEMA_VERSION:
+                    raise JournalFault(
+                        f"journal {path} schema_meta version {[r[0] for r in versions]} "
+                        f"does not match expected {SCHEMA_VERSION}; preserve this journal "
+                        "and create a new journal for the new runtime"
                     )
             mode = con.execute("PRAGMA journal_mode=WAL").fetchone()[0]
             if str(mode).lower() != "wal":
@@ -279,13 +288,9 @@ class Journal:
         (same checksum domain, ignoring the append-time created_ms) returns
         the existing row quietly; a row that differs raises JournalConflict.
 
-        N10: `self.con` uses `isolation_level=None` (SQLite's implicit
-        transaction handling disabled), which invites a caller to wrap its
-        own `BEGIN`/`COMMIT` around several journal calls -- but nested use
-        is unsupported: calling this from inside a caller-opened
-        transaction fails loud with `JournalFault: cannot start a
-        transaction within a transaction` at the `BEGIN IMMEDIATE` below,
-        leaving the caller's own transaction untouched (not rolled back).
+        Joins a caller's transaction through a savepoint, so the runtime
+        can commit settlement, classification, outbox and checkpoint as one
+        decision. Standalone calls still acquire an immediate transaction.
         """
         row = dict(row)
         row.setdefault("created_ms", _now())
@@ -294,29 +299,34 @@ class Journal:
         placeholders = ",".join("?" for _ in cols)
         conflict_clause = f" ON CONFLICT({','.join(conflict_cols)}) DO NOTHING" if conflict_cols else ""
         sql = f"INSERT INTO {table}({','.join(cols)}) VALUES({placeholders}){conflict_clause} RETURNING *"
-        self._exec("BEGIN IMMEDIATE")
-        try:
+        with self.transaction():
             cur = self._exec(sql, (*row.values(), ""))
             inserted = cur.fetchone()
             if inserted is None:
-                self._exec("ROLLBACK")
                 return self._resolve_conflict(table, row, conflict_cols)
             stored = dict(inserted)
             chk = checksum(_domain(table, stored))
             self._exec(f"UPDATE {table} SET checksum=? WHERE rowid=?", (chk, cur.lastrowid))
-            self._exec("COMMIT")
             stored["checksum"] = chk
             return stored
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """Atomic journal unit; nested users release only their savepoint."""
+        nested = self.con.in_transaction
+        name = f"pf_{getattr(self, '_savepoint_seq', 0)}"
+        self._savepoint_seq = getattr(self, '_savepoint_seq', 0) + 1
+        self._exec(f"SAVEPOINT {name}" if nested else "BEGIN IMMEDIATE")
+        try:
+            yield
+            self._exec(f"RELEASE SAVEPOINT {name}" if nested else "COMMIT")
         except BaseException:
-            # Final 9: a KeyboardInterrupt/SystemExit landing between BEGIN
-            # IMMEDIATE and COMMIT is not an Exception -- `except Exception`
-            # let it propagate straight through the open transaction,
-            # leaving the connection's next append failing with "cannot
-            # start a transaction within a transaction" (R6 hardened
-            # Journal.open() for BaseException; this closes the same gap
-            # for the write path).
             try:
-                self.con.execute("ROLLBACK")
+                if nested:
+                    self.con.execute(f"ROLLBACK TO SAVEPOINT {name}")
+                    self.con.execute(f"RELEASE SAVEPOINT {name}")
+                else:
+                    self.con.execute("ROLLBACK")
             except sqlite3.Error:
                 pass
             raise

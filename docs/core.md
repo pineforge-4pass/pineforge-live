@@ -180,8 +180,8 @@ Four bounds sit around the table, and all four bind:
   (spec §5.4's "skip (bounded) and count toward `disagree_twice`") escalate
   `STOP(FLAT_ONLY)` at the limit: a driver whose actions never go terminal
   otherwise reconciles nothing, bar after bar, with only a counter to show.
-- **`max_daily_reconciles`.** The `CORRECTION`/`FLATTEN` actions a settlement
-  emits are tallied per UTC day and refused past the cap (incident +
+- **`max_daily_reconciles`.** Admitted corrections, excluding both flatten classes,
+  are tallied per UTC day and refused past the cap (incident +
   `cycle_skipped`) — the low-n guard on corrections, because the G3 rate
   breakers are alert-only below their own `n_min` (381 samples at θ = 1%).
 - **`horizon_bars`.** Checked before each recompute, against `ledger.n` — the
@@ -192,14 +192,12 @@ Four bounds sit around the table, and all four bind:
   **refused** — spec §2's "forces an epoch rotation before the next
   settlement". The rotation itself is an operator ceremony (spec §6).
 
-The mirror-early and daily-reconcile tallies are re-derived from the day's own
-journaled `reconciles` rows at construction — and the restored day is adopted as
-the current one, so the first settle after a restart does not roll over it —
-which is what stops either cap from being laundered by bouncing the process. The
-restore joins on the rows' wall-clock `created_ms` while the roll uses the
-settled bar's own `ts_open`: the two agree in a live run, and on a replayed tape
-the restore is a bounded over-count on the first bar (the cap binds sooner,
-never later).
+Schema-v2 reconcile rows record `bar_ts_open` and `admitted_reconciles`.
+Restart restores the latest settled bar's UTC-day totals; wall-clock write
+time is provenance only. The next settled bar performs the genuine day roll.
+Proposed but refused corrections do not consume the restored cap; both
+`HARD_FLAT` and reconciler `FLATTEN` are exempt from correction/notional caps,
+while retaining the STOP permission check.
 
 **The account contract is strict.** `real_position` must be the venue's own
 snapshot *event-time after the last fill in `venue_fills`* — spec §5.4's
@@ -272,7 +270,7 @@ never fire" is three things: `UB_95(0, n_min) ≥ θ`, a window smaller than its
 the reconciler counter it watches, so one naming something nothing bumps
 observes `False` for ever.
 
-## The B3 handoff
+## The execution boundary
 
 `settle()`/`evaluate()` return a `CoreOutput`, and `CoreOutput.actions` is the
 whole contract with the execution layer. An `ActionRequest` is frozen and
@@ -303,23 +301,14 @@ above; an executor that treated the two as separate orders would double every
 entry and reversal, and the resulting position, being neither side's,
 reconciles as `unreconcilable_sides` → `STOP(FLAT_ONLY)`.
 
-**Open question B3 must answer: *when* a settle-emitted action can be matched.**
-`SYNTHETIC_CLOSE`, `CORRECTION` and `FLATTEN` are emitted by `settle(n)` with
-`target_bar_index = n`, but bar `n` is already closed — a venue can only
-report their fills during bar `n+1`, where `classify_bar`'s identity match
-(`venue_fill.target_bar_index == emulated_fill.bar_index`) will not find an
-`n`-indexed fill among bar `n+1`'s emulated fills. B2 does not resolve this:
-the core is called *with* the fills and cannot know when they were reported.
-B3 must define the submit-now / match-at-`n+1` rule explicitly — either by
-carrying the origin bar alongside the matching bar, or by holding such fills
-for the settlement that owns them. Until it does, such an echo is not
-identity-matched at all: with `cause=OURS` it falls through the unmatched-venue
-branch and reads `CONFIRMED` ("no counterpart, within the dead-band") when the
-correction did its job, and `RETRACTED` → `STOP(FLAT_ONLY)` when it did not.
-Neither is the `CONFIRMED`-by-identity B3 needs to prove a correction
-round-tripped, and the first is worse than an error: a correction that worked is
-silently absorbed. `MARKET_NOW` is on the same footing (`target_bar_index = n`
-by construction).
+**The local execution path uses explicit action receipts.**
+`ExecutionCoordinator` retains the originating bar for settle-emitted actions
+and records their venue execution separately from engine-fill classification.
+Their signed quantity enters the cumulative account basis exactly once.
+`DurableCore` commits settlement, reconcile, requests and checkpoint together,
+so a crash before commit leaves the preceding decision and a crash afterward
+recovers the existing outbox. Direct `LiveCore` callers do not acquire this
+atomicity automatically. See [execution.md](execution.md).
 
 ### B3 inputs
 
@@ -336,36 +325,26 @@ wrong that nothing here will catch:
    arrived. A `qty=0` supersede means *do not place it*.
 3. **`VenueFill.leg` is `"EXIT"` iff `reduce_only`.** Build `VenueFill`s from
    fills with exactly that rule or the classifier's match key never matches.
-4. **Match time for settle-emitted actions.** `CORRECTION`, `FLATTEN`,
+4. **Action receipts for settle-emitted actions.** `CORRECTION`, `FLATTEN`,
    `SYNTHETIC_CLOSE` and `MARKET_NOW` all carry `target_bar_index = n` for a bar
-   that is already closed — see the open question above. B3 owns the submit-now
-   / match-at-`n+1` rule, and `MARKET_NOW` in particular *depends* on it: the
-   `SETTLE_ONLY` fill is in flight for its own settlement and is confirmed at
-   `n+1`.
+   that is already closed — the execution layer retains that origin and records a separate action
+   receipt when the venue reports the fill. It does not reclassify that
+   receipt as a new engine fill at `n+1`.
 5. **`hold_expired()` escalation.** The core answers "has the HARD/HOLD bound
    elapsed"; acting on it (flatten) is B3's sequencing, and belongs with the
    `HARD_FLAT` the core does emit.
 6. **Breaker names are config.** A G3 breaker's `name` is the reconciler counter
    it watches; `BreakerTable.self_test` refuses one outside
    `reconcile.COUNTER_NAMES` at construction.
-7. **Restart-time classify/reconcile** (m10, NOT implemented here). A crash
-   between the ledger's settlement row and `settle()`'s reconcile step loses
-   that bar's classification for good: on restart `seed()` recomputes the same
-   bar, never classifies its fills, and `settle(n+1)` sees the bar-n venue fills
-   as unmatched (`CONFIRMED`-with-note if the positions agree, else `RETRACTED`
-   → STOP). Spec §6's restart flow ends "… adopt in-flight → reconcile →
-   resume", so B3 needs an entry point that re-runs classify+reconcile over the
-   seed bar's own fills. The core's half is there — `seed()` takes
-   `real_position`, and `emulated_from_settle(s, {}, s.book)` reconstructs the
-   bar's fills — but `entry_fills` need the PREVIOUS settlement's position,
-   which is in the journaled settlement row, and a deterministic re-derivation
-   of `prev_book` that this core does not persist.
-8. **`ProbeResult.levels` has no `level_resolved`** (n6, NOT implemented here).
-   Spec evaluate 3 refreshes it intrabar — "an offset bracket becomes mirrorable
-   at the first evaluate after the entry fill" — but `levels` carries only
-   `(stop, limit, activation)`. B3's mirror sync has to read `level_resolved`
-   from `SettleResult.book`, which means it sees the transition one settlement
-   late.
+7. **Atomic restart path.** `drivers/checkpoint.py` restores the core's
+   counters, pending notices, trigger deduplication, carried fills, probe
+   history and breaker samples after a fresh G1-checked seed. It refuses
+   settlements without a matching runtime checkpoint. A failed decision
+   poisons that instance; it cannot continue with mutated memory.
+8. **Intrabar level resolution.** `ProbeResult.level_resolved` captures the
+   successful AUTO run's resolved bits before the alternate-path run can
+   replace the handle's accessors. Newly resolved levels can be delivered
+   during the first evaluation; disappeared orders are not mirrorable.
 9. **B3's desired-set mirror sync** is the real guarantee that a `MISSED`
    mirrored exit's resting venue order is cancelled; the core's own
    `CANCEL_STALE_CYCLE` covers the book departure it can see.

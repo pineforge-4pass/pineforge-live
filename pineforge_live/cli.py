@@ -117,13 +117,55 @@ def cmd_tape_smoke(a):
     return asyncio.run(go())
 
 
+def cmd_execution_replay(a):
+    """Run durable core decisions through the offline mock venue."""
+    import json
+    from pineforge_live.drivers.tape_execution import execute_tape
+    report = asyncio.run(execute_tape(so=a.so, feed=a.feed, journal_dir=a.journal_dir,
+                                      start=a.start, bars=a.bars, tf=a.tf, mode=a.mode,
+                                      policy=a.policy, restart_after=a.restart_after, fault=a.fault))
+    print(json.dumps({'summary': report['summary'], 'error': report['error'],
+                      'report_errors': report['report_errors'],
+                      'report': str(a.journal_dir / 'execution-report.json')}, sort_keys=True))
+    return 1 if report['error'] else 0
+
+
+def cmd_stop_clear(a):
+    """Explicit operator clear, fenced against an active runtime writer."""
+    import time
+    from pineforge_live.journal import Journal, StopMarker
+    from pineforge_live.journal.fence import FencedLease
+    if not a.cause.strip():
+        raise ValueError('STOP clear requires a nonempty cause')
+    marker = StopMarker(a.marker or str(a.journal) + '.stop')
+    with contextlib.closing(Journal.open(a.journal, create=False)) as j:
+        lease = FencedLease(a.lock or a.journal.parent / 'runtime.lock', j)
+        now = lambda: int(time.time() * 1000)
+        lease.acquire(30_000, now())
+        try:
+            payload = marker.read()
+            cleared = 0
+            # The journal clear commits before the marker is removed.
+            # An interruption at either boundary remains stopped until
+            # an operator explicitly retries this command.
+            with j.transaction():
+                while j.append_stop_cleared(a.cause):
+                    cleared += 1
+                j.append_incident('operator_stop_clear', {'cause': a.cause, 'rows': cleared,
+                                                         'marker': str(marker.path), 'prior_marker': payload})
+            marker.clear()
+            print(f'cleared {cleared} STOP rows; cause: {a.cause}')
+        finally:
+            lease.release(now())
+    return 0
+
+
 def main(argv=None) -> int:
     """Parse argv and dispatch to the matching `cmd_*` handler; exit codes
     are 0 ok, 2 usage (argparse), 1 error (any exception from a handler)."""
     p = argparse.ArgumentParser(
         prog="pineforge-live",
-        description="pineforge-live operator CLI (Plan B1): version/engine-info/"
-                     "journal-inspect diagnostics, and the tape-smoke end-to-end self-test.",
+        description="pineforge-live diagnostics, offline execution replay, and fenced STOP recovery.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("version", help="print the CLI/adapter-api/bar-policy version line").set_defaults(fn=cmd_version)
@@ -149,6 +191,26 @@ def main(argv=None) -> int:
     s.add_argument("--bars", type=_positive_int, default=500, help="head-slice the feed to this many bars (default 500)")
     s.add_argument("--tf", default="15", help="timeframe the feed's bars are bucketed at (default 15)")
     s.set_defaults(fn=cmd_tape_smoke)
+
+    s = sub.add_parser('execution-replay', help='offline durable execution replay using the mock venue')
+    s.add_argument('so', type=Path)
+    s.add_argument('feed', type=Path)
+    s.add_argument('--journal-dir', type=Path, required=True, help='fresh output/journal directory')
+    s.add_argument('--start', type=_positive_int, default=2000)
+    s.add_argument('--bars', type=_positive_int, default=200)
+    s.add_argument('--tf', default='15')
+    s.add_argument('--mode', choices=('stream', 'check'), default='stream')
+    s.add_argument('--policy', choices=('path4', 'path4-reversed'), default='path4')
+    s.add_argument('--restart-after', type=_positive_int, help='recreate runtime after this committed decision')
+    s.add_argument('--fault', choices=('before_accept', 'after_accept'), help='inject one submit timeout')
+    s.set_defaults(fn=cmd_execution_replay)
+
+    s = sub.add_parser('stop-clear', help='explicitly clear STOP after taking the exclusive runtime lease')
+    s.add_argument('journal', type=Path)
+    s.add_argument('--cause', required=True)
+    s.add_argument('--marker', type=Path, help='STOP marker path, including markers on another filesystem')
+    s.add_argument('--lock', type=Path, help='runtime lock path (default: journal directory/runtime.lock)')
+    s.set_defaults(fn=cmd_stop_clear)
 
     a = p.parse_args(argv)
     try:

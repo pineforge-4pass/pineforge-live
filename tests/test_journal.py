@@ -534,16 +534,16 @@ def test_open_writes_schema_meta_version_on_create_and_reopen_is_clean(tmp_path)
     # not error or duplicate the row.
     p = tmp_path / "j.sqlite3"
     j = Journal.open(p)
-    assert j.rows("schema_meta", "1=1", ()) == [{"version": 1}]
+    assert j.rows("schema_meta", "1=1", ()) == [{"version": 2}]
     j.close()
     j2 = Journal.open(p, create=False)
-    assert j2.rows("schema_meta", "1=1", ()) == [{"version": 1}]
+    assert j2.rows("schema_meta", "1=1", ()) == [{"version": 2}]
     j2.close()
 
 def test_open_refuses_schema_meta_version_mismatch(tmp_path):
     p = tmp_path / "j.sqlite3"
     Journal.open(p).close()
-    con = sqlite3.connect(p); con.execute("UPDATE schema_meta SET version=2"); con.commit(); con.close()
+    con = sqlite3.connect(p); con.execute("UPDATE schema_meta SET version=999"); con.commit(); con.close()
     with pytest.raises(JournalFault, match="schema_meta version"):
         Journal.open(p, create=False)
 

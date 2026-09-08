@@ -132,3 +132,20 @@ class FencedLease:
         # holder believes itself live while a contender can already
         # acquire.
         return self.expiry_ms is None or now_ms >= self.expiry_ms
+
+    def release(self, now_ms: int) -> None:
+        """Relinquish our own drained lease; never expire a successor's token."""
+        with self._flock():
+            cur = self._read()
+            held = self.token
+            if held is None or cur is None or cur.get("token") != held or self.expired(now_ms):
+                self.token = None
+                raise LeaseLost("cannot release a missing, expired or superseded lease")
+            self.token, self.expiry_ms = None, now_ms
+            if self.journal.update_check_expiry(held, now_ms) != 1:
+                raise LeaseLost("cannot release a missing journal lease")
+            # Leave the high-water token in the file. A later owner must
+            # still increment it; no unlink/recreate race is introduced.
+            tmp = self.lock_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"token": held, "expiry_ms": now_ms}))
+            os.replace(tmp, self.lock_path)

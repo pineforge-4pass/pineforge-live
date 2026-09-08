@@ -19,7 +19,6 @@ last one -- before any `evaluate()` probe run can invalidate them.
 from __future__ import annotations
 import json
 import math
-import time
 from dataclasses import dataclass, field
 from pineforge_live import types as T
 from pineforge_live.epoch import RuntimeConfig
@@ -41,17 +40,10 @@ DAY_MS = 86_400_000
 #: position gate, neither of which waiting can change.
 CARRY_CAUSES = frozenset({"skipped_not_quiescent", "refused_budget", "refused_by_own_stop"})
 
-#: `CorrectionRequest` kinds counted against `max_daily_reconciles` (m8),
-#: and the reconciler counters that name them in a journaled `reconciles`
-#: row -- the day's tally is re-derived from those rows after a restart, so
-#: the two are the same quantity read two ways. They do NOT agree exactly
-#: (N-4): the counters are bumped at EMIT time by the reconciler, the live
-#: tally counts only requests `_permitted` let through, and the HARD_FLAT
-#: (`cls="HARD_FLAT"`, a STOP action, not a correction -- NEW-A) is counted
-#: by neither. Both differences make the restored tally an OVER-count of
-#: what was actually sent, i.e. the cap binds sooner, never later.
+#: Kinds eligible for the daily correction cap. Both venue-position
+#: flatten classes are exempt. Schema v2 records admitted_reconciles
+#: separately from the reconciler's proposed-action counters.
 RECONCILING_KINDS = frozenset({"CORRECTION", "FLATTEN"})
-RECONCILING_COUNTERS = ("missed_corrected", "topped_up", "trimmed", "flattened")
 
 #: `ActionRequest.intent` for an engine-forced close whose trade carries no
 #: exit id at all (n8): a margin call books `exit_id == ""`, and B3 hashes
@@ -290,15 +282,12 @@ class LiveCore:
             self._incident(out, "action_refused_by_stop", action=a.kind, intent=a.intent, qty=a.qty,
                            level=self.stop.level.value, disposition=self.stop.disposition.value)
             return False
-        if a.qty > 0.0 and a.cls != "HARD_FLAT":
-            # NEW-A: the HARD_FLAT is spec §5.5(c)'s STOP action, not an
-            # order the runtime chose to size, and neither RiskGuard budget
-            # applies to it: the exposure is the position the venue ALREADY
-            # holds and this order only reduces it. (The reconciler's own
-            # `FLATTEN` to `real_position` carries exactly the same exposure
-            # and is not exempt -- pre-existing since 4dab261, accepted: it
-            # is a correction, and a correction the budget refuses is a
-            # journaled refusal the reconciler can re-derive next bar.)
+        if a.qty > 0.0 and a.cls not in {"HARD_FLAT", "FLATTEN"}:
+            # B3 preliminary ruling (N-6/N-9): both the STOP's HARD_FLAT
+            # and the reconciler's FLATTEN are reduce-only and sized to
+            # real_position. Neither notional nor correction-count budgets
+            # may strand that existing venue exposure. The STOP gate above
+            # still applies; ordinary corrections retain both budgets.
             cause = self.guard.check_order_notional(a.qty, price)
             if cause is None and not a.reduce_only:
                 # Conservative bound: an exposure-increasing action can at
@@ -657,13 +646,14 @@ class LiveCore:
 
         capped = False
         for a in self._requests(out, s, dec, classified, price, prev_book, in_flight, mirrored, real_position):
-            if (a.cls != "HARD_FLAT" and a.kind in RECONCILING_KINDS
+            if (a.cls not in {"HARD_FLAT", "FLATTEN"} and a.kind in RECONCILING_KINDS
                     and self.reconciles_today >= self.limits.max_daily_reconciles):
                 # m8, spec §5.5: `max_daily_reconciles` is the low-n guard
                 # on corrections -- the G3 rate breakers are alert-only
                 # below their own `n_min`, so a runtime correcting every
                 # bar would reach no decidable rate for a year. Past the
                 # cap the cycle is SKIPPED, like any other refusal to act.
+                # Venue-position FLATTENs are exempt, like HARD_FLAT.
                 self._incident(out, "max_daily_reconciles", action=a.kind, intent=a.intent,
                                today=self.reconciles_today, cap=self.limits.max_daily_reconciles)
                 capped = True
@@ -675,7 +665,7 @@ class LiveCore:
                     # a refused HARD_FLAT must still be retried while the
                     # venue holds the position.
                     self._hard_flat_issued = True
-                elif a.kind in RECONCILING_KINDS:
+                elif a.cls != "FLATTEN" and a.kind in RECONCILING_KINDS:
                     self.reconciles_today += 1
         if capped and not dec.skipped_cycle:
             self._incident(out, "cycle_skipped", bar_index=s.bar_index)
@@ -704,9 +694,15 @@ class LiveCore:
         if s.position_size == 0.0 and our_signed_fills is None and abs(real_position) <= band:
             self._our_fills = 0.0
         self._journal_intents(out.book_diff)
+        counters = dict(dec.counters)
+        counters["admitted_reconciles"] = sum(
+            a.kind in RECONCILING_KINDS and a.cls not in ("HARD_FLAT", "FLATTEN")
+            for a in out.actions
+        )
         self.j.append_reconcile({"epoch_hash": self.spec.epoch_hash(), "bar_index": s.bar_index,
+                                 "bar_ts_open": bar.ts_open,
                                  "cause": ",".join(sorted(dec.counters)) or "clean",
-                                 "detail_json": json.dumps(dec.counters, sort_keys=True)})
+                                 "detail_json": json.dumps(counters, sort_keys=True)})
         return out
 
     def _journal_intents(self, diff: dict[str, IntentState]) -> None:
@@ -744,33 +740,24 @@ class LiveCore:
         self._day = day
 
     def _restore_day_counters(self) -> tuple[int, int]:
-        """Today's `mirror_early` count and reconciling-action count, read
-        back from the journaled `reconciles` rows (n12, m8).
+        """Restore caps for the latest reconciled bar's UTC day.
 
-        Both are per-day CAPS, and a cap that restarts at zero with the
-        process is a cap an operator can launder by bouncing the runtime --
-        the very thing the mirror-early cap exists to prevent. Each row's
-        `detail_json` is that decision's own counter bag, so the day's
-        totals are a sum over it.
-
-        The day here is the WALL-CLOCK UTC day (`reconciles` rows carry
-        `created_ms`, not the settled bar's `ts_open`), while `_roll_day`
-        rolls on the bar's own day. The two agree in a live run, where bars
-        settle as they close; they can disagree when a tape is replayed
-        through the same journal, and the restore is then a bounded
-        over-count on the first bar -- conservative in the direction that
-        matters (the cap binds sooner, never later).
-
-        Sets `self._day` to the day it summed (NEW-B), so the first
-        `_roll_day` of a live run recognises the restored day as its own
-        instead of rolling over it."""
-        day_start = int(time.time() * 1000) // DAY_MS * DAY_MS
-        self._day = day_start // DAY_MS
+        Journal write time is provenance only. A delayed close across
+        midnight and a tape replay must have the same cap as uninterrupted
+        execution. The next settlement rolls this day forward if needed.
+        """
+        rows = self.j.rows("reconciles", "epoch_hash=?", (self.spec.epoch_hash(),))
+        if not rows:
+            self._day = None
+            return 0, 0
+        self._day = max(int(row["bar_ts_open"]) for row in rows) // DAY_MS
         mirror_early = reconciling = 0
-        for row in self.j.rows("reconciles", "epoch_hash=? AND created_ms>=?", (self.spec.epoch_hash(), day_start)):
+        for row in rows:
+            if int(row["bar_ts_open"]) // DAY_MS != self._day:
+                continue
             counters = json.loads(row["detail_json"] or "{}")
             mirror_early += int(counters.get("mirror_early", 0))
-            reconciling += sum(int(counters.get(k, 0)) for k in RECONCILING_COUNTERS)
+            reconciling += int(counters.get("admitted_reconciles", 0))
         return mirror_early, reconciling
 
     def _requests(self, out: CoreOutput, s: SettleResult, dec: ReconcileDecision,

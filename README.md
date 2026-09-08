@@ -22,31 +22,38 @@ Implemented and tested:
 - **the core** — recompute ledger, intrabar probe, settled book, fill
   classification, bounded reconciler, RiskGuard/STOP, and the `LiveCore` facade.
 
-**Not implemented: exchange/venue adapters and the order executor.** That is the
-next plan, "B3". The `Executor` and `Adapter` protocols exist as interfaces only;
-the only implementations of the `Clock`, `BarSource` and `TickSource` protocols
-are the deterministic tape adapters. Nothing here can reach an exchange.
+**Local execution is implemented against a deterministic mock venue.** A
+SQLite outbox assigns durable physical-order identities; the coordinator
+submits, adopts timed-out orders, deduplicates fills and records execution
+receipts. `DurableCore` commits core decisions, their outbox, and restart
+state together. The `execution-replay` command exercises this path in stream
+and check schedules, including runtime recreation.
 
-Known gaps you should read before trusting the design, not only the code:
+**Exchange adapters and live operating loops are unfinished.** The replay is
+follow-only and never reaches an exchange. Risk validation, protective-order
+planning and emergency rate reserves have tested components, but live account
+inputs, mirror replacement, dead-man arm deadlines, DISASTER handling and
+production admission are not wired. There is no live daily-loss guarantee.
 
-- **Restart-time classify/reconcile is not implemented.** A crash between the
-  ledger's settlement row and the reconcile step loses that bar's
-  classification. On restart `seed()` recomputes the bar but never classifies
-  its fills, and the next settlement sees those venue fills as unmatched —
-  `CONFIRMED`-with-note if the positions agree, otherwise `RETRACTED` and a STOP.
-- **Settle-emitted echoes are not identity-matched.** `CORRECTION`, `FLATTEN`,
-  `SYNTHETIC_CLOSE` and `MARKET_NOW` carry the closed bar's index, so a
-  correction that in fact worked can be silently absorbed. Defining when a
-  settle-emitted action becomes matchable is explicitly B3's job.
-- **Several declared risk limits are enforced nowhere yet.**
-  `max_daily_realized_loss`, `stale_feed_ms`, `stale_eval_ms`,
-  `bar_mismatch_streak`, `unexplained_divergence_pct`,
-  `liquidation_distance_pct_min` and `recompute_ms_p99_max` are fields on
-  `RiskLimits` with no enforcement; they need venue and account inputs B3 wires
-  in. In particular **there is no daily loss limit today.**
+Current execution boundaries:
 
-What you can do today: build a `pineforge-engine` checkout, run the test suite
-against it, and run the tape-backed L1 harness on three corpus strategies.
+- A timeout after acceptance is adopted through the durable client/order
+  mapping. An absent ambiguous order remains `UNKNOWN`; the current adapter
+  protocol cannot prove exhaustive absence, so it is not blindly resubmitted.
+- Settle-emitted corrections and orders-on-close produce **action receipts**.
+  Their quantities update the real-position basis once; they are not invented
+  engine fills for the following bar. Late ledger receipts and terminal
+  residuals stop the offline driver for explicit reconciliation.
+- `MARKET_AT_OPEN` stays a notice until a successful evaluation confirms the
+  target bar's open. A requote or withdrawal is committed before submission.
+- Atomic recovery applies to the `DurableCore` path. Calling `LiveCore`
+  directly still requires a caller-owned durability design. Schema-v1 journals
+  are preserved and refused before mutation; new runs use schema v2.
+
+What you can do today: run the engine-backed tests, the existing L1 harness,
+and the [offline execution replay](docs/execution.md). The [B3 plan](docs/plan-b3.md)
+and [active ledger](ledger.md) distinguish implemented components from the
+remaining live integration and evidence gates.
 
 ## Why
 
@@ -115,7 +122,7 @@ Terms this README and the code use in a specific sense:
 
 `LiveCore` has three entry points: `seed` once at epoch open, then `settle` and
 `evaluate`, driven by whoever owns the bar and tick streams (today the L1
-harness; later B3's stream and check drivers).
+harness and the offline execution replay).
 
 ### Settle — once per confirmed bar
 
@@ -216,8 +223,8 @@ scripts/build_engine.sh
 
 `scripts/build_engine.sh` requires a `pineforge-engine` checkout with a
 `CMakeLists.txt` (it exits 2 otherwise) and a working CMake toolchain. It reads
-`PINEFORGE_ENGINE_ROOT`, whose built-in default is a path on the author's
-machine — set the variable explicitly. The script initializes the `corpus`
+`PINEFORGE_ENGINE_ROOT`; it exits 2 with a setup message when that variable
+is unset. There is no machine-specific default. The script initializes the `corpus`
 submodule if needed, runs the engine's `scripts/run_corpus.sh` with
 `SKIP_RUN=1 SKIP_VERIFY=1` and `JOBS=8` (override `JOBS` on a small machine —
 these are Eigen-heavy C++ targets), reverts the `validation_report.md` the build
@@ -231,7 +238,7 @@ corpus (300+), not the three this repository uses, so budget tens of minutes.
 Take the corpus at the commit the engine pins; never `git submodule update --remote`.
 
 The `export` does not survive a new shell. If you reopen a terminal and the
-tests suddenly skip ~99 cases, that is the missing variable, not a broken build.
+tests suddenly skip engine-backed cases, that is the missing variable, not a broken build.
 
 ### Tests
 
@@ -239,14 +246,14 @@ Without an engine — unit tests only, engine-backed cases skipped:
 
 ```sh
 python3 -m pytest -o addopts=""
-# 216 passed, 99 skipped
+# 522 passed, 122 skipped (2026-09-09 local candidate)
 ```
 
 With an engine:
 
 ```sh
 python3 -m pytest -o addopts=""   # with PINEFORGE_ENGINE_ROOT exported
-# 315 passed
+# 644 passed (2026-09-09 local candidate)
 ```
 
 `pyproject.toml` sets `addopts = "-q"`; `-o addopts=""` turns quiet mode off so
@@ -408,10 +415,13 @@ short for `--start + --bars` also exits 1, with a message.
 | `pineforge_live/epoch.py` | `EpochSpec`, `CodeIdentity`, `RuntimeConfig`, `apply_epoch` |
 | `pineforge_live/bars/` | bar policy version, `tf_ms`/`bucket_start`, forming-bar builder, bar hashing |
 | `pineforge_live/journal/journal.py` | SQLite WAL journal with a checksummed tail |
-| `pineforge_live/journal/schema.py` | the DDL and the journal schema version (v1 journals are not migrated) |
+| `pineforge_live/journal/schema.py` | the DDL and journal schema version (v2; v1 journals are preserved and refused) |
 | `pineforge_live/journal/sidecar.py` | `StopMarker`, the out-of-band STOP file |
 | `pineforge_live/journal/fence.py` | `FencedLease` — one writer per journal |
 | `pineforge_live/adapters/base.py` | `Clock`, `InstrumentSource`, `BarSource`, `TickSource`, `Executor`, `Adapter` protocols |
+| `pineforge_live/adapters/mock.py` | deterministic venue simulator and injectable execution faults |
+| `pineforge_live/execution/` | durable requests/receipts, order coordinator, risk validation and protection proposals |
+| `pineforge_live/drivers/` | atomic core checkpoints and offline execution replay |
 | `pineforge_live/adapters/tape.py` | deterministic tape clock, bar source and synthetic tick source over a feed CSV |
 | `pineforge_live/core/ledger.py` | recompute ledger, seed, G1 |
 | `pineforge_live/core/probe.py` | two-path intrabar probe |
@@ -444,10 +454,11 @@ STOP semantics: levels `NONE < FLAT_ONLY < HARD`; dispositions `NONE`, `HOLD`,
 memory. Under `FLATTEN` one reduce-only `HARD_FLAT` is permitted and exempt from
 budgets. `(HARD, NONE)` normalizes to `(HARD, HOLD)`.
 
-Clearing a STOP is an operator action, and today it is a Python API only —
-`StopMarker(path).clear()` for the sidecar and `StopController.clear(cause)` to
-drain the open journal rows. There is no CLI verb for it; a startup refuses
-while the marker is present. Use `journal-inspect` to see the state first.
+Clearing a STOP is an explicit operator action. Use `journal-inspect` first,
+then `pineforge-live stop-clear journal.sqlite3 --cause "verified venue state"`.
+The command refuses an active writer, commits the audit record and journal
+clear before removing the marker, and releases its lease. Specify `--marker`
+when the sidecar lives elsewhere. Startup refuses a set marker.
 
 What the L1 harness checks, on the runs above and only there — one 15-minute
 ETH-USDT tape, `--policy path4`, `--seed 1`, 200 bars from index 2000, three
@@ -464,16 +475,13 @@ the B4 fault-injection harness.
 
 ## Roadmap
 
-- **B3 — execution and exchange adapters.** The order executor, client ids and
-  action sequencing, the order state machine and adoption, mirror sync of the
-  settled book to the venue, dead-man arming, rate lanes, restart-time
-  classification, and the venue-fed breakers `RiskLimits` already declares. The
-  core already records the inputs B3 must honor — `in_flight` is PENDING/PARTIAL
-  only, settle-time `MARKET_AT_OPEN` is a notice rather than an order,
-  `VenueFill.leg` is `"EXIT"` exactly when the fill is reduce-only, B3 defines
-  when a settle-emitted action becomes matchable, and breaker names must exist
-  in the reconciler's counter vocabulary. The full list is `docs/core.md`'s "B3
-  inputs" section. The design spec is to be published alongside B3.
+- **B3 — execution and exchange adapters (in progress).** Durable local
+  execution, restart checkpoints, mock venue, receipt matching, risk validation,
+  protection proposals, rate reserves, and the offline CLI are implemented.
+  Remaining: real instruments and exchange adapter conformance, live stream /
+  cron scheduling, atomic protective-order replacement, dead-man deadlines,
+  DISASTER handling, complete late/partial recovery, and measured admission.
+  See [execution boundaries](docs/execution.md) and [ledger](ledger.md).
 - **B4 — fault-injection harness.** Rejects, partials, stale streams, venue
   restarts, and the coverage gaps listed above.
 - **Registry and lint work** after that.

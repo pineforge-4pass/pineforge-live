@@ -363,8 +363,8 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
     escalated FLAT_ONLY/HARD from e.g. a RETRACTED or TRIGGER_REVERSED
     fill could still ship an exposure-increasing correction (a MISSED
     entry, a QTY_DIVERGENT TOP_UP) from another fill in the SAME call --
-    the caller (Task 8) evaluates `permits` before `_raise`, so anything
-    still here at return time ships as-is.
+    LiveCore also raises the returned STOP before evaluating `permits`,
+    so each candidate still passes the caller's STOP gate before shipping.
 
     Corrections are once per DECISION, NETTED (M4/M5 + NEW-1) -- not once
     per classified fill and not once per class. Every builder describes
@@ -379,7 +379,9 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
         `basis + issued` so it corrects only the remainder.
     TRIGGER_REVERSED/ENTRY_SLIP emit at most one FLATTEN per decision
     (L6), sized to `real_position` (the venue truth), reduce-only and
-    therefore never gated by `flat_only`.
+    therefore never gated by `flat_only`. LiveCore exempts that FLATTEN,
+    like its HARD_FLAT, from per-order notional and daily correction caps;
+    its STOP gate still applies (including HARD/HOLD refusal).
 
     A MISSED fill whose ledger and `basis` sit on OPPOSITE sides (both
     nonzero) can never pass either MISSED gate; rather than counting that

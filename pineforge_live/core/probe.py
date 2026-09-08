@@ -85,6 +85,7 @@ class ProbeResult:
     levels: dict[str, tuple[float | None, float | None, float | None]]; guard_active: bool; recompute_ms: float; p_other_ran: bool
     dropped: list[ProbeFill] = dataclasses.field(default_factory=list)
     aborted: bool = False
+    level_resolved: dict[str, bool] = dataclasses.field(default_factory=dict)
 
 
 def last_bar_fills(r: RunResult, n: int) -> list[ProbeFill]:
@@ -339,9 +340,10 @@ class Probe:
         # P_auto -- while the handle's last run is still P_auto's, not
         # P_other's (which may run below) -- keyed the same way
         # settled_book always keys (the mirror's own created cycle seq).
-        probe_book: dict[str, Intent] | None = None
-        if self.policy == "intrabar_best":
-            probe_book = settled_book(self.h, dataclasses.replace(self.L.last, pending_orders=p_auto.pending_orders, cycle_seq=p_auto.position_cycle_seq))
+        probe_book = None
+        if self.policy == "intrabar_best" or any(not it.level_resolved for it in book.values()):
+            probe_book = settled_book(self.h, dataclasses.replace(
+                self.L.last, pending_orders=p_auto.pending_orders, cycle_seq=p_auto.position_cycle_seq))
 
         # M1 fix: join last_bar_fills' closed-trade fills with the
         # position-delta fill (opens/adds/reversal-opens/partial-reduces
@@ -412,7 +414,13 @@ class Probe:
                 pit = probe_book.get(k); levels[k] = (pit.stop, pit.limit, pit.activation) if pit else (it.stop, it.limit, it.activation)
         else:
             for k, it in book.items():
-                levels[k] = (it.stop, it.limit, it.activation)
+                pit = probe_book.get(k) if probe_book is not None else None
+                source = pit if not it.level_resolved and pit is not None and pit.level_resolved else it
+                levels[k] = (source.stop, source.limit, source.activation)
+        resting = {intent_key_for(po, int(po["created_position_cycle_seq"])).s for po in p_auto.pending_orders}
+        resolved = {k: (bool(probe_book.get(k) and probe_book[k].level_resolved) if probe_book is not None
+                        else k in resting and it.level_resolved) for k, it in book.items()}
         ms = round((time.perf_counter() - t0) * 1000, 3)
         self._journal(journal, forming, now_ms, "ran", ms)
-        return ProbeResult(n, forming, fills, deferred, retracted, levels, guard, ms, other_ran, dropped)
+        return ProbeResult(n, forming, fills, deferred, retracted, levels, guard, ms, other_ran, dropped,
+                           level_resolved=resolved)
