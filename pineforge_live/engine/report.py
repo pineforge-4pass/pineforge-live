@@ -35,7 +35,6 @@ def pending_order_layout(lib: ctypes.CDLL) -> tuple[int, list[tuple[str, str, in
     descs = lib.strategy_pending_order_layout(ctypes.byref(count))
     fields = [(descs[i].name.decode(), descs[i].type.decode(), int(descs[i].offset), int(descs[i].size))
               for i in range(count.value)]
-    size_field = next(f for f in fields if f[0] == "size")
     return max(f[2] + f[3] for f in fields), fields
 
 def decode_pending_order(buf: bytes, fields: list[tuple[str, str, int, int]]) -> dict[str, Any]:

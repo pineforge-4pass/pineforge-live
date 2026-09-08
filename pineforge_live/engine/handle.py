@@ -74,14 +74,17 @@ class EngineHandle:
     compiled .dylib). So run_backtest_full on a REUSED pf_strategy_t is
     NOT a pure function of (bars, config) for a compiled script: a second
     run on the same handle can differ from a fresh one (observed: a
-    phantom extra trade near the feed start). A strategy object here is
-    therefore SINGLE-USE: every run_full() creates a fresh pf_strategy_t,
-    replays the ordered setter_log onto it (so configuration is exactly
-    what the caller asked for, in order), runs, and only THEN frees the
-    previous strategy -- so pending-order / scalar accessors called right
-    after run_full() keep reading the strategy that produced that run.
-    The handle is the configuration (setter_log) plus the last run's
-    accessors, not a single persistent engine object.
+    phantom extra trade near the feed start; tracked as pineforge-engine
+    issue #219). A strategy object here is therefore SINGLE-USE: every
+    run_full() creates a fresh pf_strategy_t, replays the ordered
+    setter_log onto it (so configuration is exactly what the caller asked
+    for, in order), publishes it as the live strategy BEFORE calling into
+    the engine (so a concurrent request_abort() targets the strategy that
+    is actually running, not the previous idle one), runs, and only THEN
+    frees the previous strategy -- so pending-order / scalar accessors
+    called right after run_full() keep reading the strategy that produced
+    that run. The handle is the configuration (setter_log) plus the last
+    run's accessors, not a single persistent engine object.
     """
 
     def __init__(self, so_path: str | Path, params: dict | None = None):
@@ -154,19 +157,24 @@ class EngineHandle:
                 ts, o, h, l, c, v = b
                 arr[i].timestamp, arr[i].open, arr[i].high, arr[i].low, arr[i].close, arr[i].volume = ts, o, h, l, c, v
         new_s = self._create_strategy()
-        for name, args in self.setter_log:
-            _SETTER_APPLY[name](self.lib, new_s, *args)
+        try:
+            for name, args in self.setter_log:
+                _SETTER_APPLY[name](self.lib, new_s, *args)
+        except Exception:
+            self.lib.strategy_free(new_s)
+            raise
         rep = abi.ReportC()
         tf = script_tf.encode()
-        self.lib.run_backtest_full(new_s, arr, n, tf, tf, 0, 0, 0, ctypes.byref(rep))
-        # Swap immediately: pending-order / scalar accessors called right
-        # after run_full() must read the strategy that just ran, even if
-        # collect() below raises.
+        # Publish BEFORE calling into the engine: request_abort() (called from
+        # another thread while this run is in flight) reads self._s, so the
+        # swap must land before run_backtest_full so an abort reaches the
+        # strategy that is actually running, not the previous (idle) one.
         old_s, self._s = self._s, new_s
         try:
+            self.lib.run_backtest_full(new_s, arr, n, tf, tf, 0, 0, 0, ctypes.byref(rep))
             err = self.lib.strategy_get_last_error(new_s)
             if err and self.lib.strategy_last_run_status(new_s) == 0:
-                raise abi.EngineAbiError(err.decode("utf-8", "replace"))
+                raise abi.EngineAbiError(f"{self.so_path}: {err.decode('utf-8', 'replace')}")
             return collect(self.lib, new_s, rep, self._layout)
         finally:
             self.lib.report_free(ctypes.byref(rep))

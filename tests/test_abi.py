@@ -1,6 +1,5 @@
-import csv, threading, time
+import csv, threading
 from pathlib import Path
-import pytest
 from pineforge_live.engine import abi
 from pineforge_live.engine.handle import EngineHandle
 
@@ -84,15 +83,24 @@ def test_accessors_valid_after_run(test_so, test_feed):
             assert rc in (0, 1)
 
 def test_abort_returns_not_completed(test_so, test_feed):
-    bars = load_bars(test_feed)  # full feed (~222k bars) so the run lasts long enough
+    # Full feed (~222k bars); run_backtest_full itself takes ~29ms. Building the
+    # BarC array first takes ~110ms, so a timer armed before run_full() would
+    # fire (and be discarded by the engine, which is idle) long before the run
+    # starts. Arm it instead at run entry by wrapping the bound C function, so
+    # the 1ms delay lands inside the ~29ms run and the abort is observable.
+    bars = load_bars(test_feed)
     with EngineHandle(test_so) as h:
-        t = threading.Timer(0.01, h.request_abort)
-        t.start()
+        original_run = h.lib.run_backtest_full
+
+        def run_and_arm_abort(*args, **kwargs):
+            threading.Timer(0.001, h.request_abort).start()
+            return original_run(*args, **kwargs)
+
+        h.lib.run_backtest_full = run_and_arm_abort
         r = h.run_full(bars, "15")
-        t.join()
-        assert r.status in (0, 1)
-        if r.status == 1:
-            assert r.trades == []  # NOT_COMPLETED: the report is discarded by the caller
+        h.lib.run_backtest_full = original_run  # restore (keeps its argtypes/restype)
+        assert r.status == 1
+        assert r.trades == []  # NOT_COMPLETED: the report is discarded by the caller
         r2 = h.run_full(bars[:2000], "15")  # an idle abort never leaks into the next run
         assert r2.status == 0
 
