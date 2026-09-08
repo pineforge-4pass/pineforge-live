@@ -40,6 +40,18 @@ def corpus_spec(script_tf: str = "15", horizon_bars: int = 1_000_000) -> EpochSp
                      code_identity=CodeIdentity("e" * 64, "c" * 64, "s" * 64, {"codegen_sha": "c", "source_sha": "s", "compiler_id": "clang", "so_sha256": "0"}),
                      syminfo=corpus_syminfo(), reference_tape_sha256="t" * 64)
 
+def corpus_spec_bracket(script_tf: str = "15", horizon_bars: int = 1_000_000) -> EpochSpec:
+    """`EpochSpec` for the corpus bracket probe `ta-pivot-atr-stop-target-01`
+    (ATR stop/target via `strategy.exit`). Its `inputs.json` carries no
+    `ohlcv_csv`/tf override, so -- like `ta-sma-152-close-cross-01` -- it
+    runs on the same default 15m ETH-USDT feed (`test_feed`) and the same
+    `"TAPE"` syminfo/venue; only the loaded `.so` (`test_so_bracket`)
+    differs."""
+    return EpochSpec(venue="TAPE", instrument=T.InstrumentId("TAPE", T.MarketType.PERP, "ETHUSDT"), script_tf=script_tf,
+                     history_start_ms=1_577_836_800_000, horizon_bars=horizon_bars,
+                     code_identity=CodeIdentity("e" * 64, "c" * 64, "s" * 64, {"codegen_sha": "c", "source_sha": "s", "compiler_id": "clang", "so_sha256": "0"}),
+                     syminfo=corpus_syminfo(), reference_tape_sha256="t" * 64)
+
 def make_handle(test_so: Path, spec: EpochSpec) -> EngineHandle:
     """Load `test_so` and replay `spec`'s setter sequence onto a fresh `EngineHandle`."""
     h = EngineHandle(test_so); apply_epoch(h, spec); return h

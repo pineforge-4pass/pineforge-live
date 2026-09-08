@@ -2,7 +2,7 @@ from pineforge_live.core import book as B
 from pineforge_live.core import ids
 from pineforge_live.core.ids import IntentKey
 from pineforge_live.core.ledger import Ledger
-from tests.helpers import load_bars, make_handle, corpus_spec, open_journal
+from tests.helpers import load_bars, make_handle, corpus_spec, corpus_spec_bracket, open_journal
 
 def intent(oid, kind, is_long, stop=None, limit=None, from_entry="", resolved=True, created_bar=0, seq=1):
     return B.Intent(IntentKey(oid, kind, from_entry, seq), 0, is_long, kind, from_entry, stop, limit, None, resolved, created_bar, B.content_hash(stop, limit, None, is_long))
@@ -55,3 +55,16 @@ def test_settled_book_from_engine(test_so, test_feed, tmp_path):
     for k, it in bk.items():
         assert k == it.key.s and it.kind in ids.ORDER_TYPE_NAMES  # kind comes from the engine's OrderType names
         assert isinstance(it.level_resolved, bool)
+
+def test_settled_book_from_bracket_probe_holds_a_non_market_intent(test_so_bracket, test_feed, tmp_path):
+    # The sma probe (test_so above) only ever exposes a MARKET pending
+    # order; this bracket probe (strategy.exit ATR stop/target) settles
+    # with a real EXIT-kind mirror row -- pinned here at a bar count
+    # (500, within the reported 500-5000 window) where that holds.
+    spec = corpus_spec_bracket(); h = make_handle(test_so_bracket, spec); j, _ = open_journal(tmp_path)
+    j.append_epoch(spec.epoch_hash(), "{}")
+    L = Ledger(h, spec, j, "rc"); s = L.seed(load_bars(test_feed, 500))
+    bk = B.settled_book(h, s)
+    non_market = [it for it in bk.values() if it.kind != "MARKET"]
+    assert non_market, f"expected >=1 non-MARKET intent, got kinds {[it.kind for it in bk.values()]}"
+    assert all(it.kind in ids.ORDER_TYPE_NAMES for it in bk.values())

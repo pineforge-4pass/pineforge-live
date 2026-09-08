@@ -22,6 +22,17 @@ def test_so(engine_root: Path) -> Path:
     return Path(hits[0])
 
 @pytest.fixture(scope="session")
+def test_so_bracket(engine_root: Path) -> Path:
+    """The corpus bracket probe (`ta-pivot-atr-stop-target-01`): a
+    strategy.exit ATR stop/target, so its pending-order mirror exposes real
+    ENTRY/EXIT rows (unlike the sole MARKET row `test_so` ever shows)."""
+    hits = glob.glob(str(engine_root / "corpus/validation/ta-pivot-atr-stop-target-01/strategy.*"))
+    hits = [h for h in hits if h.endswith((".dylib", ".so"))]
+    if not hits:
+        pytest.skip("corpus strategy library not built; run scripts/build_engine.sh")
+    return Path(hits[0])
+
+@pytest.fixture(scope="session")
 def test_feed(engine_root: Path) -> Path:
     p = engine_root / "corpus/data/derived/ohlcv_ETH-USDT-USDT_15m.csv"
     if not p.exists():
