@@ -406,6 +406,31 @@ def test_missed_fill_failing_both_gates_with_a_real_gap_marks_skipped_cycle():
     assert d.corrections == [] and d.counters.get("skipped_position_mismatch") == 1
     assert d.skipped_cycle
 
+def test_correction_requests_carry_their_own_reduce_only_flag():
+    """Task 8 review F1: whether a correction REDUCES the venue-side
+    position is the reconciler's own knowledge, so it is stated on the
+    request rather than re-derived downstream from `kind`. A MISSED-EXIT
+    `MARKET_CORRECT` is reduce-only by the same contract that lets it run
+    ungated by `flat_only` (`_emit_missed_correction(increases=False)`);
+    Task 8's `_requests` re-derived the flag from the kind alone, labelled
+    that one exposure-increasing, and had `permits()` refuse under
+    FLAT_ONLY the ONE order FLAT_ONLY exists to allow. One pin per kind."""
+    # MISSED entry -- exposure-increasing.
+    d = R.reconcile(inp([cf(C.FillClass.MISSED)], real_position=0.3, ledger_position=1.0))
+    assert [(c.kind, c.reduce_only) for c in d.corrections] == [("MARKET_CORRECT", False)]
+    # MISSED exit -- reduce-only: the venue still holds what the ledger closed.
+    d = R.reconcile(inp([cf(C.FillClass.MISSED, leg="EXIT", is_long=True, intent="XL")], ledger_position=0.0, real_position=1.0))
+    assert [(c.kind, c.reduce_only) for c in d.corrections] == [("MARKET_CORRECT", True)]
+    # QTY_DIVERGENT excess -- reduce-only.
+    d = R.reconcile(inp([cf(C.FillClass.QTY_DIVERGENT, qty=1.0)], real_position=1.5, ledger_position=1.0))
+    assert [(c.kind, c.reduce_only) for c in d.corrections] == [("REDUCE_ONLY_TRIM", True)]
+    # QTY_DIVERGENT shortfall -- exposure-increasing.
+    d = R.reconcile(inp([cf(C.FillClass.QTY_DIVERGENT, qty=1.0)], real_position=0.5, ledger_position=1.0))
+    assert [(c.kind, c.reduce_only) for c in d.corrections] == [("TOP_UP", False)]
+    # FLATTEN -- reduce-only, sized to the venue truth.
+    d = R.reconcile(inp([cf(C.FillClass.TRIGGER_REVERSED)], real_position=0.5, ledger_position=1.0))
+    assert [(c.kind, c.reduce_only) for c in d.corrections] == [("FLATTEN", True)]
+
 def test_skipped_cycle_from_missed_refusal_blocks_a_same_decision_top_up():
     """NEW-9 (Y6): X1's fills, but the MISSED correction is refused by
     [r4] (`missed_distance_bps` beyond `max_missed_entry_distance_bps`) --

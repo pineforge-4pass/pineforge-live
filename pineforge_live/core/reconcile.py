@@ -42,8 +42,19 @@ class CorrectionRequest:
     exposure-increasing), or `FLATTEN` (TRIGGER_REVERSED/ENTRY_SLIP,
     reduce real to zero). `intent` is the originating `EmulatedFill`'s own
     id, `None` when the correction has no single originating fill
-    (`FLATTEN`)."""
-    kind: str; side: T.Side; qty: float; reason: str; intent: str | None
+    (`FLATTEN`).
+
+    `reduce_only` states whether the order REDUCES the venue-side
+    position, which is this module's own knowledge and is NOT derivable
+    from `kind`: a `MARKET_CORRECT` is exposure-increasing for a missed
+    ENTRY and reduce-only for a missed EXIT (the venue still holds what
+    the ledger closed), and the EXIT branch is deliberately the one
+    `_emit_missed_correction` runs with `increases=False` so it ships
+    ungated under `FLAT_ONLY`. A caller re-deriving the flag from `kind`
+    alone (Task 8's `_requests` did) labels that correction
+    exposure-increasing and has `StopController.permits` refuse under
+    `FLAT_ONLY` the one order `FLAT_ONLY` exists to allow."""
+    kind: str; side: T.Side; qty: float; reason: str; intent: str | None; reduce_only: bool = False
 
 @dataclass(frozen=True)
 class ReconcileInput:
@@ -156,7 +167,7 @@ def _emit_missed_correction(inp: ReconcileInput, d: ReconcileDecision, bump, e: 
         bump("skipped_position_mismatch"); return 0.0
     if increases and qty * inp.price > inp.cfg.budget_notional:
         d.skipped_cycle = True; bump("refused_budget"); return 0.0
-    d.corrections.append(CorrectionRequest("MARKET_CORRECT", corr_side, qty, "MISSED", e.intent))
+    d.corrections.append(CorrectionRequest("MARKET_CORRECT", corr_side, qty, "MISSED", e.intent, reduce_only=not increases))
     bump("missed_corrected")
     return qty if corr_side == T.Side.BUY else -qty
 
@@ -236,7 +247,7 @@ def _emit_top_up(inp: ReconcileInput, d: ReconcileDecision, bump, e: EmulatedFil
         d.residual_qty += signed; bump("refused_by_own_stop"); return
     if qty * inp.price > inp.cfg.budget_notional:
         d.residual_qty += signed; bump("refused_budget"); return
-    d.corrections.append(CorrectionRequest("TOP_UP", _side_for(signed), qty, "QTY_DIVERGENT", e.intent))
+    d.corrections.append(CorrectionRequest("TOP_UP", _side_for(signed), qty, "QTY_DIVERGENT", e.intent, reduce_only=False))
     bump("topped_up")
 
 def _reconcile_qty_divergent(inp: ReconcileInput, d: ReconcileDecision, bump, qty_divergent: list[ClassifiedFill],
@@ -279,14 +290,14 @@ def _reconcile_qty_divergent(inp: ReconcileInput, d: ReconcileDecision, bump, qt
     if ledger != 0.0 and basis != 0.0 and (basis > 0) != (ledger > 0):
         # NEW-3: reduce to flat first (reduce-only, ungated), then re-open.
         if abs(basis) > band:
-            d.corrections.append(CorrectionRequest("REDUCE_ONLY_TRIM", _side_for(-basis), abs(basis), "QTY_DIVERGENT", e.intent))
+            d.corrections.append(CorrectionRequest("REDUCE_ONLY_TRIM", _side_for(-basis), abs(basis), "QTY_DIVERGENT", e.intent, reduce_only=True))
             bump("trimmed")
         else:
             d.residual_qty += -basis; bump("residual_carried")
         _emit_top_up(inp, d, bump, e, signed=ledger, band=band, flat_only=flat_only)
         return
     if delta * side > 0:
-        d.corrections.append(CorrectionRequest("REDUCE_ONLY_TRIM", _side_for(-delta), abs(delta), "QTY_DIVERGENT", e.intent))
+        d.corrections.append(CorrectionRequest("REDUCE_ONLY_TRIM", _side_for(-delta), abs(delta), "QTY_DIVERGENT", e.intent, reduce_only=True))
         bump("trimmed"); return
     _emit_top_up(inp, d, bump, e, signed=-delta, band=band, flat_only=flat_only)
 
@@ -411,7 +422,7 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
     # opens a position the other way -- both legs reduce-only, so the M3
     # gate never catches it (X3/X4). Emitting one ends the decision.
     if need_flatten and inp.real_position != 0.0:
-        d.corrections.append(CorrectionRequest("FLATTEN", _side_for(-inp.real_position), abs(inp.real_position), flatten_cause, None))
+        d.corrections.append(CorrectionRequest("FLATTEN", _side_for(-inp.real_position), abs(inp.real_position), flatten_cause, None, reduce_only=True))
         if missed_entries:
             # NEW-7: the FLATTEN already covers the venue position, but it
             # must not also drop the L7/NEW-5 SKIPPED marking -- a MISSED
