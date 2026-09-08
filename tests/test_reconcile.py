@@ -443,8 +443,9 @@ def test_counter_names_lists_exactly_what_reconcile_bumps():
     src = inspect.getsource(R)
     literals = {name for call in re.findall(r"bump\(([^()]*)\)", src) for name in re.findall(r'"([a-z_]+)"', call)}
     # the one non-literal call site: `bump(cls.value.lower())` over the
-    # three classes the reconciler merely tallies.
-    literals |= {C.FillClass.CONFIRMED.value.lower(), C.FillClass.IN_FLIGHT.value.lower(), C.FillClass.SYNTHETIC.value.lower()}
+    # four classes the reconciler merely tallies.
+    literals |= {c.value.lower() for c in (C.FillClass.CONFIRMED, C.FillClass.IN_FLIGHT,
+                                           C.FillClass.SYNTHETIC, C.FillClass.SETTLE_ONLY)}
     assert literals == R.COUNTER_NAMES
 
 

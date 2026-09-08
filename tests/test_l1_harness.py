@@ -231,3 +231,37 @@ def test_a_stop_is_reported_json_serialisable_and_exits_1(test_so, test_feed, tm
     assert set(doc["summary"]) == SUMMARY_KEYS
     assert "l1: bars 1" in p.stdout                          # the summary line still printed
     assert "STOP" in p.stdout and "bars_divergence" in p.stdout
+
+
+def test_l1_harness_on_the_pooc_probe_has_no_missed_fill(test_so_pooc, test_feed, tmp_path):
+    """M5, spec §4 settle 6: "`process_orders_on_close` fills -> MARKET
+    now" had no code at all. `probe_suppress_tail_logic` means no probe
+    ever sees a POOC fill, so the settlement emulated it with an order
+    that never rested in the book and the RECONCILER repaired it as
+    MISSED: 4 of 200 bars on this fixture -- a 2% steady state, straight
+    through the spec's own 1% orphan+missed breaker -- each one gated
+    behind the `[r4]` age/distance/budget bound the spec does not put on a
+    POOC fill, and a same-bar POOC reversal would have read
+    `unreconcilable_sides` on the first cross.
+
+    The fixture is `order-deferred-flip-pooc-cross-bar-01`
+    (`process_orders_on_close=true`: the `strategy.close` fires at the
+    cross bar's own close while the stop entry waits for the next open).
+    Same 15m ETH-USDT feed and `"TAPE"` syminfo as the other two probes --
+    its directory carries no `inputs.json` at all. 200 bars from 2000,
+    the same window as the release-criterion runs."""
+    out = tmp_path / "pooc.json"
+    p = _run("--so", test_so_pooc, "--feed", test_feed, "--start", 2000, "--bars", 200,
+             "--journal", tmp_path / "j", "--out", out)
+    assert p.returncode == 0, p.stdout + p.stderr
+    doc = json.loads(out.read_text())
+    s = doc["summary"]
+    assert s["bars"] == 200 and s["g1_failures"] == 0 and s["probe_not_settled"] == 0 and s["stops"] == 0
+    assert s["incidents"] == 0
+    classes = [cls for b in doc["bars"] for cls in b["non_confirmed"]]
+    assert classes and set(classes) == {"SETTLE_ONLY"}, classes      # zero MISSED over the window
+    pooc_bars = [b for b in doc["bars"] if b["non_confirmed"]]
+    assert len(pooc_bars) == 4                                       # the four POOC closes in this window
+    for b in pooc_bars:
+        assert [(a["kind"], a["reduce_only"], a["target_bar_index"]) for a in b["actions"]] == \
+               [("MARKET_NOW", True, b["bar_index"])]

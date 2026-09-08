@@ -20,10 +20,10 @@ from .riskguard import stronger
 #: dead. Keep in sync with the `bump(...)` call sites -- there is a test
 #: that reads them out of this module's own source and compares.
 COUNTER_NAMES: frozenset[str] = frozenset({
-    "account_mismatch", "confirmed", "gap_carried", "in_flight", "malformed", "mirror_early", "missed",
-    "missed_corrected", "path_divergent", "refused_budget", "refused_by_own_stop", "refused_skipped_cycle",
-    "residual_carried", "skipped_cycle", "skipped_not_quiescent", "skipped_position_mismatch", "synthetic",
-    "topped_up", "trimmed",
+    "account_mismatch", "confirmed", "flattened", "gap_carried", "in_flight", "malformed", "mirror_early",
+    "missed", "missed_corrected", "path_divergent", "refused_budget", "refused_by_own_stop",
+    "refused_skipped_cycle", "residual_carried", "settle_only", "skipped_cycle", "skipped_not_quiescent",
+    "skipped_position_mismatch", "synthetic", "topped_up", "trimmed",
 })
 
 @dataclass(frozen=True)
@@ -423,7 +423,12 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
             _escalate(d, T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "RETRACTED: real ≠ ledger beyond dead-band")
         elif cls == FillClass.UNATTRIBUTED_VENUE:
             _escalate(d, T.StopLevel.HARD, T.StopDisposition.FLATTEN, "venue-initiated fill")
-        elif cls in (FillClass.CONFIRMED, FillClass.IN_FLIGHT, FillClass.SYNTHETIC):
+        elif cls in (FillClass.CONFIRMED, FillClass.IN_FLIGHT, FillClass.SYNTHETIC, FillClass.SETTLE_ONLY):
+            # M5: `SETTLE_ONLY` is tallied like `IN_FLIGHT` and corrected
+            # like neither -- spec §4 settle 6 places the MARKET for it
+            # NOW, from the caller, and the venue reports it at n+1. It is
+            # not a fill the venue missed, so no MISSED bound, no budget
+            # and no `[r4]` age applies to it.
             bump(cls.value.lower())
 
     # ---- X13: the ledger and our OWN fills point OPPOSITE ways (both
@@ -463,6 +468,7 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
     # gate never catches it (X3/X4). Emitting one ends the decision.
     if need_flatten and inp.real_position != 0.0:
         d.corrections.append(CorrectionRequest("FLATTEN", _side_for(-inp.real_position), abs(inp.real_position), flatten_cause, None, reduce_only=True))
+        bump("flattened")
         if missed_entries:
             # NEW-7: the FLATTEN already covers the venue position, but it
             # must not also drop the L7/NEW-5 SKIPPED marking -- a MISSED

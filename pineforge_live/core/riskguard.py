@@ -87,10 +87,17 @@ class RiskLimits:
     module): `max_abs_position`/`max_notional` (`RiskGuard.check_position`),
     `max_order_notional` (`check_order_notional`),
     `max_fill_actions_per_bar`/`max_book_ops_per_bar` (per-bar counters
-    reset by `begin_bar`), `horizon_alert_pct` (`horizon`), and
-    `hard_stop_max_hold_ms` (`StopController.hold_expired`). NOT enforced
-    here: `max_daily_realized_loss`, `max_daily_reconciles`, and
-    `disagree_twice` are counted by the reconciler (`counters`); `stale_feed_ms`,
+    reset by `begin_bar`), `horizon_alert_pct` (`horizon`, called by
+    `LiveCore.settle` before each recompute), and `hard_stop_max_hold_ms`
+    (`StopController.hold_expired`).
+
+    Enforced by `LiveCore` rather than here, because each needs state this
+    module does not hold (n11 -- the old docstring claimed the reconciler
+    counted them, which it never did): `max_daily_reconciles` is a per-UTC-day
+    tally of the CORRECTION/FLATTEN actions `settle()` actually emits, and
+    `disagree_twice` bounds consecutive settlements the reconciler skipped
+    as not quiescent (spec §5.4). NOT enforced anywhere yet:
+    `max_daily_realized_loss`; `stale_feed_ms`,
     `stale_eval_ms`, `bar_mismatch_streak`, `unexplained_divergence_pct`,
     `liquidation_distance_pct_min`, and `recompute_ms_p99_max` are declared
     but unwired -- they need venue/account inputs B3 wires into

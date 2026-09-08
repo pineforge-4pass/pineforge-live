@@ -309,7 +309,12 @@ def test_seed_shifted_history_conflict_leaves_no_bars_row(env):
     Ledger(h, spec, j, "rc").seed(bars[:2000])
     with pytest.raises(LedgerDivergence) as e:
         Ledger(h, spec, j, "rc").seed(bars[1:2001])
-    assert e.value.cause == "seed_conflict"
+    # n7: the shifted history is now caught by the FULL hash-vector check
+    # (every journaled settlement row inside the history's own length),
+    # which runs before the settlement pre-check and names the first bar
+    # whose recomputed hash disagrees -- a strictly better diagnosis of a
+    # shifted chain than "a row for bar N already exists".
+    assert e.value.cause == "seed_hashes"
     assert not j.rows("bars", "epoch_hash=? AND ts_open=?", (spec.epoch_hash(), bars[2000].ts_open))
     # The correct history then re-seeds cleanly (idempotent) and settle()
     # continues onto bars[2000] with no incident.

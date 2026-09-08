@@ -25,6 +25,13 @@ class FillClass(enum.Enum):
     CONFIRMED = "CONFIRMED"; IN_FLIGHT = "IN_FLIGHT"; MISSED = "MISSED"; SYNTHETIC = "SYNTHETIC"; QTY_DIVERGENT = "QTY_DIVERGENT"
     PATH_DIVERGENT = "PATH_DIVERGENT"; MIRROR_EARLY = "MIRROR_EARLY"; TRIGGER_REVERSED = "TRIGGER_REVERSED"; ENTRY_SLIP = "ENTRY_SLIP"
     RETRACTED = "RETRACTED"; UNATTRIBUTED_VENUE = "UNATTRIBUTED_VENUE"
+    #: M5, spec §4 settle 6: a fill of an order that never RESTED in the
+    #: previous settled book -- a `process_orders_on_close` fill, which the
+    #: engine books at this bar's close with no pending order to precede
+    #: it. There was never a venue counterpart to miss: the caller places
+    #: it as a MARKET now (`live.LiveCore._requests`) and the venue reports
+    #: it at n+1, so it is in flight for THIS settlement, not MISSED.
+    SETTLE_ONLY = "SETTLE_ONLY"
 
 @dataclass(frozen=True)
 class EmulatedFill:
@@ -55,9 +62,16 @@ class EmulatedFill:
     `classify_bar` never emits `QTY_DIVERGENT` from an ambiguous fill (see
     its docstring) -- an ambiguous fill's `"?"` intent cannot identity-match
     any real venue fill, so it always reads `MISSED`, and the venue side's
-    own fill(s) reconcile independently against the ledger/real position."""
+    own fill(s) reconcile independently against the ledger/real position.
+
+    `rested=False` (M5) marks a fill whose order was NOT in the previous
+    settled book at all -- there was no pending order for a venue to be
+    holding, so an unmatched such fill is `SETTLE_ONLY` (spec §4 settle 6's
+    `process_orders_on_close` case), never `MISSED`. An AMBIGUOUS fill is
+    excluded: its candidates did rest, they just could not be told apart,
+    and its `"?"` intent must not become an order id."""
     intent: str; leg: str; is_long: bool; qty: float; price: float; bar_index: int; close_cause: int = 0
-    ambiguous: bool = False
+    ambiguous: bool = False; rested: bool = True
 
 @dataclass(frozen=True)
 class VenueFill:
@@ -243,6 +257,9 @@ def classify_bar(emulated, venue, *, in_flight_intents, mirrored_intents, dead_b
             continue
         if e.intent in in_flight_intents:
             out.append(ClassifiedFill(FillClass.IN_FLIGHT, e, None, e.qty, "action non-terminal; deferred"))
+        elif not e.rested and not e.ambiguous:
+            out.append(ClassifiedFill(FillClass.SETTLE_ONLY, e, None, e.qty,
+                                      "order never rested; process_orders_on_close fill"))
         else:
             out.append(ClassifiedFill(FillClass.MISSED, e, None, e.qty, "emulated fill, no venue fill, nothing in flight"))
     return out
@@ -331,18 +348,25 @@ def emulated_from_settle(s, book_diff: dict[str, IntentState], prev_book: dict) 
     """
     n = s.bar_index
     out: list[EmulatedFill] = []
+    # M5: which ids were RESTING going into this bar. A fill of anything
+    # else had no pending order for a venue to hold, so it is a settle-only
+    # (`process_orders_on_close`) fill rather than one the venue missed.
+    rested_ids = {it.key.order_id for it in prev_book.values()}
     for t in s.trades:
         if t.open_at_end:
             continue
         if t.entry_bar_index == n:
-            out.append(EmulatedFill(t.entry_id, "ENTRY", t.is_long, t.qty, t.entry_price, n, t.close_cause))
+            out.append(EmulatedFill(t.entry_id, "ENTRY", t.is_long, t.qty, t.entry_price, n, t.close_cause,
+                                    rested=t.entry_id in rested_ids))
         if t.exit_bar_index == n:
-            out.append(EmulatedFill(t.exit_id, "EXIT", t.is_long, t.qty, t.exit_price, n, t.close_cause))
+            out.append(EmulatedFill(t.exit_id, "EXIT", t.is_long, t.qty, t.exit_price, n, t.close_cause,
+                                    rested=t.exit_id in rested_ids))
     for ef in s.entry_fills:
         cands = _delta_candidates(ef, book_diff, prev_book)
         if len(cands) <= 1:
             intent = cands[0].key.order_id if cands else "?"
-            out.append(EmulatedFill(intent, ef["leg"], ef["is_long"], ef["qty"], ef["price"], ef["bar_index"], 0))
+            out.append(EmulatedFill(intent, ef["leg"], ef["is_long"], ef["qty"], ef["price"], ef["bar_index"], 0,
+                                    rested=bool(cands)))
             continue
         fixed_qtys = [it.qty for it in cands]
         if all(q is not None for q in fixed_qtys) and abs(sum(fixed_qtys) - ef["qty"]) <= _EPS:

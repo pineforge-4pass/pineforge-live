@@ -22,8 +22,9 @@ class LedgerDivergence(RuntimeError):
     journal conflict): STOP(HARD) territory (spec §4.1) -- a divergent
     recompute against a previous incarnation, never a revised bar (that's
     `BarsDivergence`). `cause` names which check failed -- `hash_len`,
-    `seed_mismatch`, `seed_conflict`, `g1_prefix`, `g1_hash`, `g1_trades`,
-    `g1_bars`, `settlement_conflict` -- and `detail` carries the evidence.
+    `seed_mismatch`, `seed_conflict`, `seed_hashes`, `g1_prefix`, `g1_hash`,
+    `g1_trades`, `g1_bars`, `settlement_conflict` -- and `detail` carries
+    the evidence.
     """
     def __init__(self, cause: str, detail: dict | None = None):
         super().__init__(f"{cause}: {detail}"); self.cause, self.detail = cause, detail or {}
@@ -302,6 +303,11 @@ class Ledger:
         `settle()` distinguishes bar vs. settlement conflicts because it
         has the additional "revised settled bar" case to rule out.
 
+        n7: before that, EVERY journaled settlement row inside this
+        history's own length is checked against the recomputed hash
+        vector, so a restart re-establishes G1 over the whole chain
+        rather than over its last link (`LedgerDivergence("seed_hashes")`).
+
         N2 fix (review): a conflicting `settlements` row for this
         `bar_index` is checked for BEFORE anything is journaled -- the
         journal can't wrap the bar + settlement writes in one transaction
@@ -333,6 +339,22 @@ class Ledger:
         s = self._result(bars, r, ms, None, book)
         if expected_trades_sha256 is not None and s.trades_sha256 != expected_trades_sha256:
             raise LedgerDivergence("seed_mismatch", {"expected": expected_trades_sha256, "got": s.trades_sha256})
+        # n7, spec §1's G1 "for all m < n": the recompute must reproduce
+        # EVERY hash the journal holds for this epoch, not just the last
+        # settlement's. `settle()` checks bar n-1 per bar and the full
+        # prefix follows by induction only for a chain this process
+        # settled itself -- a RESTART re-establishes the chain from a
+        # journal it did not write in this incarnation, so it is exactly
+        # where the whole vector has to be checked once. Rows beyond this
+        # history's own length are out of scope here (there is no
+        # `hashes[m]` to compare); the settlement pre-check below and
+        # `settle()`'s own conflict handling cover those.
+        mismatch = next(((int(row["bar_index"]), int(row["broker_state_hash"]), s.hashes[int(row["bar_index"])])
+                         for row in self.j.rows("settlements", "epoch_hash=?", (self.spec.epoch_hash(),))
+                         if 0 <= int(row["bar_index"]) < len(s.hashes)
+                         and int(row["broker_state_hash"]) != s.hashes[int(row["bar_index"])]), None)
+        if mismatch is not None:
+            raise LedgerDivergence("seed_hashes", {"m": mismatch[0], "journaled": mismatch[1], "recomputed": mismatch[2]})
         existing = self.j.settlement(self.spec.epoch_hash(), s.bar_index)
         if existing is not None:
             expected_row = self._settlement_row(s, bh)

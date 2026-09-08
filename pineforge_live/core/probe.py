@@ -73,10 +73,18 @@ class ProbeResult:
     book (`dropped`), the settled intents' resolved levels refreshed under
     the trail policy (`levels`), whether the dual-entry guard suppressed
     an entry (`guard_active`), how long the recompute took, and whether
-    `P_other` had to run at all (`p_other_ran`)."""
+    `P_other` had to run at all (`p_other_ran`).
+
+    `aborted=True` marks a result whose run the engine reported
+    NOT_COMPLETED (`RunResult.status != 0`), on either path: every list is
+    then empty because nothing was DECIDED, which is not the same claim as
+    "this tick confirmed no fills". A caller that acts on the ABSENCE of a
+    fill -- `LiveCore`'s withdraw of an unconfirmed advance (m5) -- has to
+    tell the two apart or it cancels live orders on an engine hiccup."""
     bar_index: int; forming: T.NormalizedBar; fills: list[ProbeFill]; deferred: list[ProbeFill]; retracted: list[ProbeFill]
     levels: dict[str, tuple[float | None, float | None, float | None]]; guard_active: bool; recompute_ms: int; p_other_ran: bool
     dropped: list[ProbeFill] = dataclasses.field(default_factory=list)
+    aborted: bool = False
 
 
 def last_bar_fills(r: RunResult, n: int) -> list[ProbeFill]:
@@ -323,7 +331,7 @@ class Probe:
         if p_auto.status != 0:
             ms = int((time.perf_counter() - t0) * 1000)
             self._journal(journal, forming, now_ms, "aborted", ms)
-            return ProbeResult(n, forming, [], [], [], {}, guard, ms, False, [])
+            return ProbeResult(n, forming, [], [], [], {}, guard, ms, False, [], aborted=True)
 
         guard = dual_entry_guard(book, self.L.last.position_size, p_auto.last_bar_dual_entry_path)
 
@@ -362,7 +370,7 @@ class Probe:
                 # abort -- they were already computed above and the caller
                 # otherwise loses that signal, even though no fill/deferral
                 # is confirmed on a half-run.
-                return ProbeResult(n, forming, [], [], [], {}, guard, ms, True, dropped)
+                return ProbeResult(n, forming, [], [], [], {}, guard, ms, True, dropped, aborted=True)
             d_other = _delta_fill(p_other, self.L.last.position_size, forming, book, n)
             other_all = last_bar_fills(p_other, n) + ([d_other] if d_other is not None else [])
             other_kept, _ = _drop_unresting_entries(other_all, resting_ids)

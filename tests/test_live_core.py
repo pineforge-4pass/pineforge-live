@@ -1,6 +1,6 @@
 """`LiveCore` (spec §4 settle 1-8 / evaluate 1-4, §5.4, §5.5) and the L1
 mini-harness. Venue-neutral throughout: every venue name is `"TAPE"`."""
-import asyncio, pytest
+import asyncio, json, pytest
 from pineforge_live import types as T
 from pineforge_live.core.live import ActionRequest, LiveCore
 from pineforge_live.core.reconcile import DeadBand, ReconcileDecision
@@ -221,34 +221,61 @@ def test_settled_market_entry_becomes_a_close_and_an_open_leg(core):
 
 def test_a_settled_market_is_requested_once_not_again_by_the_probe(core):
     """`[r4]` one open action per intent: the MARKET_AT_OPEN settle(n)
-    emitted for bar n+1 replaces the probe's own TRIGGER for the same
-    (intent, leg) on that bar with ONE superseding MARKET_AT_OPEN carrying
-    the engine's open-price qty (F6, `reason="open_requote"`), and that is
-    emitted at most once per (intent, leg) per bar however many ticks
-    evaluate() sees."""
+    emitted for bar n+1 stands as the advance, and the probe's own fill of
+    the same (intent, leg) on that bar is NOT a second request.
+
+    m5/F6: on this fixture (partition 1, fixed qty) the engine's qty at
+    the open equals the settle-time close proxy, so the first evaluate of
+    bar 2001 confirms both legs and emits NOTHING -- no TRIGGER (the same
+    fill, seen from the other side of the bar boundary) and no requote
+    (there is no size to fix). A requote is for a real qty difference and
+    a withdraw for a leg the open did not confirm; neither applies here,
+    and an unconditional requote cost an order op per settled MARKET leg
+    per bar for nothing."""
     c, bars, j = core
     c.seed(bars[:2000])
     out = c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
-    assert {(a.intent, a.reduce_only) for a in out.actions if a.kind == "MARKET_AT_OPEN"} == {("L", True), ("L", False)}
+    advance = {(a.intent, a.reduce_only, a.qty) for a in out.actions if a.kind == "MARKET_AT_OPEN"}
+    assert advance == {("L", True, 1.0), ("L", False, 1.0)}
     fb = FormingBarBuilder(c.spec.script_tf); emitted = []
     for t in ticks_for(bars[2001], c.spec.script_tf):
         fb.push(t); emitted += c.evaluate(fb.forming(), now_ms=t.ts).actions
-    assert [a.kind for a in emitted if a.intent == "L"] == ["MARKET_AT_OPEN", "MARKET_AT_OPEN"]
-    assert {(a.reduce_only, a.reason, a.target_bar_index) for a in emitted if a.intent == "L"} == {
-        (True, "open_requote", 2001), (False, "open_requote", 2001)}
+    assert emitted == []
+    assert c.pending_market == {}          # both keys were confirmed and consumed
 
-def test_cancel_stale_cycle_never_fires_for_an_intent_that_filled(core):
+def test_cancel_stale_cycle_reads_venue_truth_not_ledger_truth(core, test_so, test_feed, tmp_path):
     """`book_diff` reads CANCELLED for an order that FILLED as well as one
-    that was cancelled (see `IntentState`); LiveCore disambiguates with the
-    bar's own emulated fills, so a filled MARKET never produces a
-    CANCEL_STALE_CYCLE."""
+    that was cancelled (see `IntentState`), so the bar's own fills have to
+    disambiguate -- and m3: only a fill the VENUE reported proves the venue
+    is no longer holding the order.
+
+    NEW-1: both arms settle with `mirrored={"L"}`, or the N3 "is the venue
+    even holding it" gate suppresses the cancel before the fill check is
+    consulted and the disambiguation is unpinned (verified: with the fill
+    check deleted, an unmirrored pin passes either way).
+
+    The mirrored-and-venue-filled arm is the original claim (a filled
+    order is never chased). The mirrored-and-NOT-venue-filled arm is m3:
+    the ledger filled the order, the venue did not (a MISSED being
+    repaired by a MARKET_CORRECT), and its resting `closePosition` order
+    is still live at the venue -- exactly the order that must be cancelled
+    before it fires on the next cycle's position."""
+    from pineforge_live.core.book import IntentState
     c, bars, j = core
     c.seed(bars[:2000])
-    c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
-    out = c.settle(bars[2001], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
-    from pineforge_live.core.book import IntentState
+    legs = [a for a in c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0).actions
+            if a.kind == "MARKET_AT_OPEN"]
+    venue = _echo(legs, bars[2001], 2001)
+    out = c.settle(bars[2001], venue, set(), {"L"}, 1.0, 0, our_signed_fills=1.0)
     assert out.book_diff == {"L|MARKET||54": IntentState.CANCELLED}
     assert [a for a in out.actions if a.kind == "CANCEL_STALE_CYCLE"] == []
+
+    unfilled = tmp_path / "unfilled"; unfilled.mkdir()
+    c2, _j2 = _core(test_so, unfilled)
+    c2.seed(bars[:2000])
+    c2.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    out2 = c2.settle(bars[2001], [], set(), {"L"}, -1.0, 0, our_signed_fills=-1.0)
+    assert [(a.kind, a.intent) for a in out2.actions if a.kind == "CANCEL_STALE_CYCLE"] == [("CANCEL_STALE_CYCLE", "L")]
 
 def test_seed_divergence_raises_hard_hold(core):
     """A `LedgerDivergence` out of `seed()` (here a trades-digest mismatch
@@ -398,8 +425,13 @@ def test_a_settled_market_is_requoted_at_the_open_price_qty(core, monkeypatch):
     fb = FormingBarBuilder(c.spec.script_tf); emitted = []
     for t in ticks_for(bars[2001], c.spec.script_tf):
         fb.push(t); emitted += c.evaluate(fb.forming(), now_ms=t.ts).actions
+    # The stub reports the ENTRY leg only, so the reduce-only advance for
+    # the same intent is a leg the open did not confirm -- m5 withdraws it
+    # with a `qty=0` supersede rather than leaving an order standing at the
+    # venue that the ledger will never book.
     assert [(a.kind, a.intent, a.qty, a.reduce_only, a.reason, a.target_bar_index) for a in emitted] == [
-        ("MARKET_AT_OPEN", "L", 2.5, False, "open_requote", 2001)]
+        ("MARKET_AT_OPEN", "L", 2.5, False, "open_requote", 2001),
+        ("MARKET_AT_OPEN", "L", 0.0, True, "withdraw", 2001)]
 
 def test_the_settled_market_legs_size_the_close_to_the_live_position(core):
     """F7 (first half): on the corpus reversal targeted at bar 2001, the
@@ -538,3 +570,325 @@ def test_a_g3_breaker_alerts_then_breaches_on_the_missed_counter(test_so, test_f
     assert seen[3][1] == (T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "g3:missed")
     assert c.stop.level == T.StopLevel.FLAT_ONLY and c.stop.cause == "g3:missed"
     assert [r for r in j.rows("incidents", "kind=?", ("g3_breached",))]
+
+
+# --- final wave: M1, M3, M4, m5-m11, n8, n9, n12, NEW-2..4 --------------------
+
+def test_an_idempotent_re_delivery_settles_nothing_twice(core):
+    """M1: `Ledger.settle` returns the LAST settlement unchanged for a
+    byte-identical re-delivery of the bar it already settled (spec §4.8) --
+    check mode's REST catch-up delivers one routinely. LiveCore has to
+    notice: re-running the settlement over the SAME `SettleResult` emulates
+    the bar's fills a second time against whatever `venue_fills` the driver
+    passes (normally none, since they were consumed), classifies them
+    MISSED, reconciles again -- a duplicate `MARKET_CORRECT` is real money
+    -- writes a SECOND `reconciles` row for the bar, and resets
+    `pending_market` from re-derived legs."""
+    c, bars, j = core
+    c.seed(bars[:2000])
+    first = c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    pending_before = dict(c.pending_market)
+    assert pending_before and first.classified == []
+    again = c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    assert again.settle is first.settle
+    assert again.classified == [] and again.actions == [] and again.reconcile is None and again.stop is None
+    assert [x["kind"] for x in again.incidents] == ["idempotent_redelivery"]
+    assert c.pending_market == pending_before
+    rows = j.rows("reconciles", "bar_index=?", (2000,))
+    assert len(rows) == 1
+
+
+def test_a_venue_initiated_fill_produces_one_hard_flat(core):
+    """M3, spec §5.5(c): `UNATTRIBUTED_VENUE` escalates `STOP(HARD,
+    FLATTEN)` and `permits("hard_flat", ...)` is carefully
+    disposition-aware -- but nothing EMITTED the order, so the remaining
+    venue position sat under HARD (where no new reduce-only order is
+    permitted except this one) indefinitely. It is emitted from the STOP
+    state, not by the reconciler: a HARD_FLAT is not a correction toward
+    the ledger, it is the disposition acting on venue truth."""
+    c, bars, j = core
+    c.seed(bars[:2000])
+    liq = VenueFill(None, None, T.Side.BUY, 2.0, bars[2000].c, 2000, T.FillCause.LIQUIDATION, None)
+    out = c.settle(bars[2000], [liq], set(), set(), 1.0, 0, our_signed_fills=1.0)
+    assert out.stop == (T.StopLevel.HARD, T.StopDisposition.FLATTEN, "venue-initiated fill")
+    flat = [a for a in out.actions if a.kind == "FLATTEN"]
+    assert [(a.side, a.qty, a.reduce_only, a.cls) for a in flat] == [(T.Side.SELL, 1.0, True, "HARD_FLAT")]
+    assert [x for x in out.incidents if x["kind"] == "hard_flat"]
+    # once only: the venue is being flattened, not flattened every bar
+    again = c.settle(bars[2001], [], set(), set(), 1.0, 0, our_signed_fills=1.0)
+    assert [a for a in again.actions if a.kind == "FLATTEN"] == []
+
+
+def test_a_skipped_missed_is_re_presented_and_ages(core, monkeypatch):
+    """M4(a): `emulated_from_settle` emits bar-n fills only and
+    `classify_bar` has no memory, so a MISSED the reconciler skipped as
+    NOT QUIESCENT simply vanished -- nothing aged it, nothing re-counted
+    it, and `[r4]`'s "≤ 1 script bar old" bound could never bind because no
+    (intent, leg) ever read MISSED on two consecutive settlements. The
+    carry re-presents it, so `missed_since` ages it."""
+    import pineforge_live.core.live as live
+    c, bars, j = core
+    c.seed(bars[:2000])
+    miss = ClassifiedFill(FillClass.MISSED, EmulatedFill("L", "ENTRY", True, 1.0, bars[2000].c, 2000), None, 1.0, "")
+    monkeypatch.setattr(live, "classify_bar", lambda *a, **k: [miss])
+    out = c.settle(bars[2000], [], {"X"}, set(), -1.0, 0, our_signed_fills=-1.0)
+    assert out.reconcile.counters.get("skipped_not_quiescent") == 1
+    assert c._carried_missed and c.missed_since == {("L", "ENTRY"): 2000}
+    monkeypatch.setattr(live, "classify_bar", lambda *a, **k: [])
+    out = c.settle(bars[2001], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    assert [x.cls for x in out.classified] == [FillClass.MISSED]      # re-presented, not lost
+    assert out.reconcile.counters.get("missed") == 1
+    # the same pair now reads MISSED on two consecutive settlements, which
+    # is what makes the `[r4]` age bound reachable at all
+    assert c._missed_bounds(out.classified, 2001, bars[2001].c)[0] == 1
+
+
+def test_consecutive_non_quiescent_settles_escalate_at_disagree_twice(core):
+    """M4(b), spec §5.4: "else skip (bounded) and count toward
+    `disagree_twice`". A driver whose actions never go terminal makes every
+    settlement non-quiescent and the reconciler then does NOTHING, bar
+    after bar, with only a counter to show for it. `disagree_twice` was
+    declared in `RiskLimits` and read nowhere."""
+    c, bars, j = core
+    c.seed(bars[:2000])
+    assert c.limits.disagree_twice == 2
+    first = c.settle(bars[2000], [], {"L"}, set(), -1.0, 0, our_signed_fills=-1.0)
+    assert first.stop is None and c._not_quiescent_streak == 1
+    second = c.settle(bars[2001], [], {"L"}, set(), -1.0, 0, our_signed_fills=-1.0)
+    assert second.stop == (T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "disagree_twice")
+    assert [x for x in second.incidents if x["kind"] == "disagree_twice"]
+
+
+def test_a_quiescent_settle_resets_the_non_quiescent_streak(core):
+    """M4(b), the other half: the bound is on CONSECUTIVE skips."""
+    c, bars, j = core
+    c.seed(bars[:2000])
+    c.settle(bars[2000], [], {"L"}, set(), -1.0, 0, our_signed_fills=-1.0)
+    c.settle(bars[2001], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    assert c._not_quiescent_streak == 0
+
+
+def test_the_daily_reconcile_cap_refuses_and_skips_the_cycle(test_so, test_feed, tmp_path, monkeypatch):
+    """m8, spec §5.5: `max_daily_reconciles` is the low-n guard on
+    corrections -- the G3 rate breakers are alert-only below their own
+    `n_min` (381 samples at theta = 1%), so a runtime correcting every bar
+    reaches no decidable rate for a year. It was declared, core-computable
+    and unwired."""
+    import pineforge_live.core.live as live
+    limits = RiskLimits(1e6, 1e12, 1e9, 8, 32, 1e9, 1, 60_000, 60_000, 3, 2, 2.0, 1.0, 5_000)
+    c, j = _core(test_so, tmp_path, limits=limits)
+    bars = load_bars(test_feed, 2300)
+    c.seed(bars[:2000])
+    def missed_on(bar_index, is_long):
+        # the missed entry has to sit on the LEDGER's own side (short at
+        # bar 2000, long after the 2001 reversal) or the reconciler's
+        # representative filter drops it before the cap is ever consulted
+        return [ClassifiedFill(FillClass.MISSED, EmulatedFill("L", "ENTRY", is_long, 1.0, bars[bar_index].c, bar_index),
+                               None, 1.0, "")]
+    monkeypatch.setattr(live, "classify_bar", lambda *a, **k: missed_on(2000, False))
+    out = c.settle(bars[2000], [], set(), set(), 0.0, 0, our_signed_fills=0.0)
+    assert [a.kind for a in out.actions if a.kind == "CORRECTION"] == ["CORRECTION"] and c.reconciles_today == 1
+    monkeypatch.setattr(live, "classify_bar", lambda *a, **k: missed_on(2001, True))
+    out = c.settle(bars[2001], [], set(), set(), 0.0, 0, our_signed_fills=0.0)
+    assert [a for a in out.actions if a.kind == "CORRECTION"] == []
+    kinds = [x["kind"] for x in out.incidents]
+    assert "max_daily_reconciles" in kinds and "cycle_skipped" in kinds
+
+
+def test_the_horizon_alerts_once_then_refuses_the_settle(test_so, test_feed, tmp_path):
+    """m7, spec §2: `horizon_bars` is the frozen `last_bar_index` the
+    epoch's `realtime_tail` pins `pine_last_bar_index()` to, so settling
+    past it runs the engine with a `last_bar_index` BELOW the actual last
+    bar. "At 80% consumption the runtime alerts and at 100% forces an
+    epoch rotation before the next settlement" -- `RiskGuard.horizon` was
+    written, pinned, and called by nothing."""
+    from tests.helpers import corpus_spec
+    spec = corpus_spec(horizon_bars=2002)
+    h = make_handle(test_so, spec)
+    m = StopMarker(tmp_path / "j.stop"); m.prepare(); j = Journal.open(tmp_path / "j.sqlite3", stop_marker=m)
+    rc = RuntimeConfig(poll_interval_ms=30_000, drain_bound_ms=5_000, grace_ms=3_000, open_wait_ms=2_000, risk_limits={})
+    c = LiveCore(h, spec, j, m, rc, LIMITS, DeadBand(0.001, 0.001, 5.0),
+                 [Breaker("missed", 0.01, 500, n_min_for(0.01), 5)])
+    bars = load_bars(test_feed, 2300)
+    c.seed(bars[:2000])
+    first = c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)      # 2001/2002 -- past 80%
+    assert [x["kind"] for x in first.incidents] == ["horizon_alert"] and first.stop is None
+    second = c.settle(bars[2001], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)     # 2002/2002 -- exhausted
+    assert second.settle is None and second.stop == (T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "horizon")
+    assert [x["kind"] for x in second.incidents] == ["horizon_exhausted"]
+    assert c.ledger.n == 2001                       # the settle was REFUSED, not run
+    assert "horizon_alert" not in [x["kind"] for x in second.incidents]   # one incident per crossing
+
+
+def test_two_same_bar_triggers_are_bounded_by_their_sum(test_so, test_feed, tmp_path, monkeypatch):
+    """m11: `check_position` bounded `abs(settled position) + a.qty`, so
+    two same-bar pyramiding TRIGGERs on distinct intents each passed on
+    their own while their SUM breached `max_abs_position`."""
+    limits = RiskLimits(2.5, 1e12, 1e9, 8, 32, 1e9, 50, 60_000, 60_000, 3, 2, 2.0, 1.0, 5_000)
+    c, j = _core(test_so, tmp_path, limits=limits)
+    bars = load_bars(test_feed, 2300)
+    c.seed(bars[:2000])
+    fills = [ProbeFill("L1", "ENTRY", True, 1.5, bars[2001].c, 2001, 2001),
+             ProbeFill("L2", "ENTRY", True, 1.5, bars[2001].c, 2001, 2001)]
+    monkeypatch.setattr(c.probe, "evaluate",
+                        lambda forming, now_ms, journal=None: _probe_result(2001, forming, fills))
+    fb = FormingBarBuilder(c.spec.script_tf)
+    t = ticks_for(bars[2001], c.spec.script_tf)[0]
+    fb.push(t); ev = c.evaluate(fb.forming(), now_ms=t.ts)
+    assert [a.intent for a in ev.actions] == ["L1"]
+    assert [(x["kind"], x["intent"], x["cause"]) for x in ev.incidents if x["kind"] == "risk_refused"] == [
+        ("risk_refused", "L2", "max_abs_position")]
+
+
+def test_a_refused_open_requote_cancels_the_advance(core, monkeypatch):
+    """NEW-2: the advance was gated and emitted at `settle(n)` and is
+    standing at the venue. A STOP raised between the settlement and the
+    first `evaluate()` of bar n+1 refuses the requote -- and journaling
+    `action_refused_by_stop` while the advance it supersedes goes on to
+    fill is a record that lies. A cancel is always permitted, and under a
+    STOP it is the right outcome."""
+    c, bars, j = core
+    c.seed(bars[:2000])
+    out = c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    assert [a.kind for a in out.actions if a.kind == "MARKET_AT_OPEN"] == ["MARKET_AT_OPEN", "MARKET_AT_OPEN"]
+    c.stop.raise_stop(T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "test")
+    pf = ProbeFill("L", "ENTRY", True, 2.5, bars[2001].o, 2001, 2001)     # differs from the proxy -> a real requote
+    monkeypatch.setattr(c.probe, "evaluate",
+                        lambda forming, now_ms, journal=None: _probe_result(2001, forming, [pf]))
+    fb = FormingBarBuilder(c.spec.script_tf)
+    t = ticks_for(bars[2001], c.spec.script_tf)[0]
+    fb.push(t); ev = c.evaluate(fb.forming(), now_ms=t.ts)
+    kinds = [(a.kind, a.intent, a.qty, a.reason) for a in ev.actions]
+    assert ("CANCEL_STALE_CYCLE", "L", 0.0, "open_requote refused; the settled advance must not stand") in kinds
+    assert [x["kind"] for x in ev.incidents if x["kind"] == "action_refused_by_stop"] == ["action_refused_by_stop"]
+    assert ("L", "ENTRY") not in c.pending_market
+
+
+
+
+def test_a_requote_does_not_spend_the_fill_action_budget(test_so, test_feed, tmp_path, monkeypatch):
+    """NEW-3: a requote AMENDS an order the settlement already counted,
+    gated and placed, so counting it again would make a two-leg reversal
+    need a budget of 4 where spec §4's invariant is "<= P's fill count".
+    At `max_fill_actions_per_bar = 1` the requote used to raise
+    `RiskViolation` -> `STOP(FLAT_ONLY)` on the reversal bar. A TRIGGER
+    still spends the budget."""
+    limits = RiskLimits(1e6, 1e12, 1e9, 1, 32, 1e9, 50, 60_000, 60_000, 3, 2, 2.0, 1.0, 5_000)
+    c, j = _core(test_so, tmp_path, limits=limits)
+    bars = load_bars(test_feed, 2300)
+    c.seed(bars[:2000])
+    c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    fills = [ProbeFill("L", "EXIT", False, 1.0, bars[2001].o, 2000, 2001),      # the reduce-only advance, re-quoted
+             ProbeFill("L", "ENTRY", True, 2.5, bars[2001].o, 2001, 2001)]      # ... and the opened leg
+    monkeypatch.setattr(c.probe, "evaluate",
+                        lambda forming, now_ms, journal=None: _probe_result(2001, forming, fills))
+    fb = FormingBarBuilder(c.spec.script_tf)
+    t = ticks_for(bars[2001], c.spec.script_tf)[0]
+    fb.push(t); ev = c.evaluate(fb.forming(), now_ms=t.ts)
+    assert [(a.kind, a.reason) for a in ev.actions] == [("MARKET_AT_OPEN", "open_requote")]
+    assert ev.stop is None and [x for x in ev.incidents if x["kind"] == "risk_violation"] == []
+
+
+def test_our_fills_reset_reads_the_venues_own_word_not_the_accumulator(core, monkeypatch):
+    """NEW-4: "the venue is flat" is the VENUE's own word
+    (`real_position`), not our accumulator's. Guarding the per-cycle reset
+    on `|basis|` made the accumulator sticky exactly when it was wrong: a
+    liquidation flattens the venue while the accumulator still carries our
+    position, so `|basis|` never fell inside the band, the reset never
+    fired, and every later bar re-raised `account_mismatch` until an
+    operator restart re-seeded."""
+    import pineforge_live.core.live as live
+    c, bars, j = core
+    c.seed(bars[:2000])                                   # adoption anchor: -1.0
+    real_settle = c.ledger.settle
+    def flat_settle(bar, now_ms):
+        s = real_settle(bar, now_ms); s.position_size = 0.0; return s
+    monkeypatch.setattr(c.ledger, "settle", flat_settle)
+    monkeypatch.setattr(live, "classify_bar", lambda *a, **k: [])
+    liq = VenueFill(None, None, T.Side.BUY, 1.0, bars[2000].c, 2000, T.FillCause.LIQUIDATION, None)
+    c.settle(bars[2000], [liq], set(), set(), 0.0, 0)
+    assert c.our_signed_fills == 0.0                      # the venue says flat, so the cycle really is over
+    out = c.settle(bars[2001], [], set(), set(), 0.0, 0)
+    assert out.reconcile.counters.get("account_mismatch") is None
+
+
+def test_seed_anchors_the_basis_on_the_venue_and_refuses_a_disagreement(test_so, test_feed, tmp_path):
+    """m6, spec §6: "cold start with an existing position -> refuse unless
+    `--adopt-position`". Anchoring the fallback basis on the RECOMPUTE
+    means a restart can reach a STOP the uninterrupted run never raises: a
+    legitimate hold-flat state (MIRROR_EARLY -- venue 0, ledger +1, no
+    STOP) comes back as basis +1 against a real 0, i.e. `account_mismatch`
+    on the very first settlement of a state the run was carrying happily."""
+    bars = load_bars(test_feed, 2300)
+    c, j = _core(test_so, tmp_path)
+    out = c.seed(bars[:2000], real_position=-1.0)         # the venue agrees with the recompute
+    assert out.settle is not None and c.our_signed_fills == -1.0 and out.stop is None
+
+    refused_dir = tmp_path / "refused"; refused_dir.mkdir()
+    c2, _ = _core(test_so, refused_dir)
+    out = c2.seed(bars[:2000], real_position=0.0)         # the venue is flat, the ledger is short
+    assert out.settle is None
+    assert out.stop == (T.StopLevel.HARD, T.StopDisposition.HOLD, "cold_start_position")
+    assert [x for x in out.incidents if x["kind"] == "cold_start_position"]
+
+    adopted_dir = tmp_path / "adopted"; adopted_dir.mkdir()
+    c3, _ = _core(test_so, adopted_dir)
+    out = c3.seed(bars[:2000], real_position=0.0, adopt_position=True)
+    assert out.settle is not None and out.stop is None and c3.our_signed_fills == 0.0
+
+
+def test_a_synthetic_close_without_an_exit_id_carries_a_stable_intent(core, monkeypatch):
+    """n8: a margin-call close books `exit_id == ""`, and B3 hashes the
+    intent into the order's client id -- an empty one collides across
+    every such close."""
+    import pineforge_live.core.live as live
+    from pineforge_live.core.classify import CLOSE_CAUSE_MARGIN_CALL
+    c, bars, j = core
+    c.seed(bars[:2000])
+    mc = ClassifiedFill(FillClass.SYNTHETIC,
+                        EmulatedFill("", "EXIT", True, 1.0, bars[2000].c, 2000, CLOSE_CAUSE_MARGIN_CALL), None, 1.0, "")
+    monkeypatch.setattr(live, "classify_bar", lambda *a, **k: [mc])
+    out = c.settle(bars[2000], [], set(), set(), 1.0, 0, our_signed_fills=1.0)
+    syn = [a for a in out.actions if a.kind == "SYNTHETIC_CLOSE"]
+    assert [(a.intent, a.reduce_only) for a in syn] == [("__synthetic__", True)]
+
+
+def test_the_settled_books_transitions_are_journaled(core):
+    """n9, spec §6: the `intents` table. The settled book and its diff are
+    the core's own product -- nothing else derives them -- and B3 needs the
+    durable copy to re-run a journaled STOP's cancel step on restart
+    without first recomputing the ledger to find out what was resting."""
+    c, bars, j = core
+    c.seed(bars[:2000])
+    out = c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    rows = {r["intent_key"]: r for r in j.rows("intents", "epoch_hash=?", (c.spec.epoch_hash(),))}
+    assert set(rows) == set(out.book_diff)
+    for key, state in out.book_diff.items():
+        assert rows[key]["state"] == state.value
+        payload = json.loads(rows[key]["payload_json"])
+        it = out.book.get(key)
+        assert (payload == {} if it is None else payload["content_hash"] == it.content_hash)
+    # a later transition of the same key REPLACES the row (latest state)
+    out2 = c.settle(bars[2001], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    rows2 = {r["intent_key"]: r["state"] for r in j.rows("intents", "epoch_hash=?", (c.spec.epoch_hash(),))}
+    for key, state in out2.book_diff.items():
+        assert rows2[key] == state.value
+
+
+def test_the_mirror_early_day_tally_survives_a_restart(test_so, test_feed, tmp_path, monkeypatch):
+    """n12: `mirror_early_today` restarted at 0 on every process start, so
+    the per-day cap was launderable by bouncing the runtime -- the exact
+    thing the cap exists to prevent. It is re-derived from today's
+    journaled `reconciles` rows at construction."""
+    import pineforge_live.core.live as live
+    c, j = _core(test_so, tmp_path)
+    bars = load_bars(test_feed, 2300)
+    c.seed(bars[:2000])
+    early = ClassifiedFill(FillClass.MIRROR_EARLY, None,
+                           VenueFill("x", "EXIT", T.Side.SELL, 1.0, bars[2000].c, 2000, T.FillCause.OURS, "c"), 1.0, "")
+    monkeypatch.setattr(live, "classify_bar", lambda *a, **k: [early])
+    c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    assert c.mirror_early_today == 1
+    reborn = LiveCore(c.h, c.spec, j, c.marker, c.rc, LIMITS, DeadBand(0.001, 0.001, 5.0),
+                      [Breaker("missed", 0.01, 500, n_min_for(0.01), 5)])
+    assert reborn.mirror_early_today == 1

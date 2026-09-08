@@ -16,7 +16,8 @@ from pineforge_live.adapters.tape import load_feed_csv
 from pineforge_live.epoch import EpochSpec
 from pineforge_live.harness import make_handle, open_journal, tape_spec, tape_syminfo
 
-__all__ = ["load_bars", "corpus_syminfo", "corpus_spec", "corpus_spec_bracket", "make_handle", "open_journal"]
+__all__ = ["load_bars", "corpus_syminfo", "corpus_spec", "corpus_spec_bracket", "corpus_spec_pooc",
+           "make_handle", "open_journal"]
 
 def load_bars(feed: Path, limit: int | None = None) -> list[T.NormalizedBar]:
     """The first `limit` bars of a `timestamp,open,high,low,close,volume`
@@ -43,4 +44,15 @@ def corpus_spec_bracket(script_tf: str = "15", horizon_bars: int = 1_000_000) ->
     runs on the same default 15m ETH-USDT feed (`test_feed`) and the same
     `"TAPE"` syminfo/venue; only the loaded `.so` (`test_so_bracket`)
     differs, which is why this is the same spec rather than another one."""
+    return tape_spec(script_tf, horizon_bars)
+
+def corpus_spec_pooc(script_tf: str = "15", horizon_bars: int = 1_000_000) -> EpochSpec:
+    """`EpochSpec` for the corpus POOC probe
+    (`order-deferred-flip-pooc-cross-bar-01`: `process_orders_on_close=true`,
+    a weekly-reset deferred-flip chain). Its probe directory holds no
+    `inputs.json` at all, so -- like `ta-sma-152-close-cross-01` and
+    `ta-pivot-atr-stop-target-01` -- it runs on the default 15m ETH-USDT
+    feed (`test_feed`) and the same `"TAPE"` syminfo; only the loaded `.so`
+    (`test_so_pooc`) differs, which is why this is the same spec rather
+    than another one."""
     return tape_spec(script_tf, horizon_bars)

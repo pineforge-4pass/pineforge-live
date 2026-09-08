@@ -19,6 +19,7 @@ last one -- before any `evaluate()` probe run can invalidate them.
 from __future__ import annotations
 import json
 import math
+import time
 from dataclasses import dataclass, field
 from pineforge_live import types as T
 from pineforge_live.epoch import RuntimeConfig
@@ -30,6 +31,28 @@ from .reconcile import COUNTER_NAMES, DeadBand, ReconcileConfig, ReconcileDecisi
 from .riskguard import Breaker, BreakerTable, RateWindow, RiskGuard, RiskLimits, RiskViolation, StopController
 
 DAY_MS = 86_400_000
+
+#: The reconciler counters that mean "this decision declined to act for a
+#: reason that can be different next bar" (M4a): a non-quiescent settle, a
+#: correction the budget refused, one this run's own STOP level refused.
+#: The MISSED fills of such a decision are re-presented at the next
+#: settlement so they keep ageing against `[r4]`'s bound instead of being
+#: dropped -- unlike a decision skipped by that bound itself, or by a
+#: position gate, neither of which waiting can change.
+CARRY_CAUSES = frozenset({"skipped_not_quiescent", "refused_budget", "refused_by_own_stop"})
+
+#: `CorrectionRequest` kinds counted against `max_daily_reconciles` (m8),
+#: and the reconciler counters that name them in a journaled `reconciles`
+#: row -- the two must agree, since the day's tally is re-derived from
+#: those rows after a restart.
+RECONCILING_KINDS = frozenset({"CORRECTION", "FLATTEN"})
+RECONCILING_COUNTERS = ("missed_corrected", "topped_up", "trimmed", "flattened")
+
+#: `ActionRequest.intent` for an engine-forced close whose trade carries no
+#: exit id at all (n8): a margin call books `exit_id == ""`, and B3 hashes
+#: the intent into the order's client id, so an empty one would collide
+#: across every such close.
+SYNTHETIC_INTENT = "__synthetic__"
 
 
 @dataclass(frozen=True)
@@ -58,10 +81,25 @@ class ActionRequest:
     once per request. The one producer of such a pair is spec §4 settle
     6's MARKET leg: `settle(n)` asks for it in advance, priced off the
     only price it has (bar n's close), and the first `evaluate()` of bar
-    n+1 re-quotes it with the engine's qty at the OPEN
-    (`reason="open_requote"`), which is the qty the spec actually
-    specifies. `leg` here is `"EXIT"` when `reduce_only` else `"ENTRY"`,
-    the same pairing `classify.classify_bar` matches venue fills on.
+    n+1 settles its fate with the open known. `leg` here is `"EXIT"` when
+    `reduce_only` else `"ENTRY"`, the same pairing
+    `classify.classify_bar` matches venue fills on.
+
+    The settle-time advance is NOTICE, not an order: it exists so B3 can
+    have the order in place at the open, and B3 submits it only once the
+    open is known and the first `evaluate()` of the target bar has said
+    which of three things it is (m5):
+
+      * `reason="open_requote"` with the engine's own qty at the open --
+        the advance's close-priced proxy was wrong by more than the dead
+        band; this is the qty spec §4 settle 6 specifies, and B3 cannot
+        re-derive it afterwards (the handle's accessors describe its LAST
+        run);
+      * nothing at all -- the two qtys agree within the dead band, so the
+        advance already carries the right size;
+      * `qty=0` with `reason="withdraw"` -- the engine's admission gate
+        refused the order at the open, so there is nothing to place and
+        the advance must NOT stand.
     """
     kind: str; intent: str | None; side: T.Side; qty: float; price_hint: float | None
     reduce_only: bool; cls: str; reason: str; target_bar_index: int
@@ -104,11 +142,6 @@ def signed_qty(venue_fills: list[VenueFill]) -> float:
     return sum((v.qty if v.side is T.Side.BUY else -v.qty) for v in venue_fills if v.cause is T.FillCause.OURS)
 
 
-#: Pre-rename spelling, kept so an in-flight caller (or a monkeypatching
-#: test) that reached for the private name still resolves.
-_signed = signed_qty
-
-
 class LiveCore:
     """Composes the ledger, probe, classifier, reconciler, RiskGuard and
     STOP controller into the two entry points a driver calls.
@@ -144,8 +177,12 @@ class LiveCore:
         self.g3_windows: dict[str, RateWindow] = {b.name: RateWindow(b.window_n) for b in breakers}
         self.rcfg = reconcile_cfg or ReconcileConfig(1, 30.0, limits.max_order_notional, 3, False)
         self.book: dict[str, Intent] = {}
-        self.mirror_early_today = 0
-        self._mirror_early_day: int | None = None
+        # n12/m8: the two per-UTC-day tallies. Both are re-derived from
+        # today's journaled `reconciles` rows at construction, so neither
+        # cap is launderable by restarting the process; `_roll_day` zeroes
+        # them at the settled bar's own day boundary from then on.
+        self.mirror_early_today, self.reconciles_today = self._restore_day_counters()
+        self._day: int | None = None
         # spec §4 settle 6: the MARKET legs this settlement asked for at the
         # NEXT bar's open, keyed by (intent id, leg). `evaluate()` on that
         # bar suppresses its own TRIGGER for the same (intent, leg) -- they
@@ -157,6 +194,22 @@ class LiveCore:
         self._triggered: set[tuple[str, str]] = set()
         self._our_fills = 0.0
         self.missed_since: dict[tuple[str, str], int] = {}
+        # M4(a): the MISSED fills of a decision that declined to act for a
+        # reason that can change (CARRY_CAUSES), re-presented at the next
+        # settlement.
+        self._carried_missed: list[ClassifiedFill] = []
+        # M4(b): consecutive settlements the reconciler skipped as not
+        # quiescent -- spec §5.4's "skip (bounded) and count toward
+        # disagree_twice".
+        self._not_quiescent_streak = 0
+        # M3: the HARD_FLAT this run has already asked for, so a restart
+        # (which re-reads it off the journal) re-issues one only if the
+        # venue still holds a position.
+        self._hard_flat_issued = False
+        # m7: the horizon alert is one incident per crossing, not one per bar.
+        self._horizon_alerted = False
+        # m11: exposure this bar's already-permitted requests committed.
+        self._bar_committed_qty = 0.0
         journal.append_epoch(spec.epoch_hash(), "{}")
         journal.append_runtime_config(runtime_config.hash(), "{}")
 
@@ -228,11 +281,18 @@ class LiveCore:
             cause = self.guard.check_order_notional(a.qty, price)
             if cause is None and not a.reduce_only:
                 # Conservative bound: an exposure-increasing action can at
-                # most add its whole qty to the side already held.
-                cause = self.guard.check_position(abs(position) + a.qty, price)
+                # most add its whole qty to the side already held -- plus
+                # whatever this bar's already-permitted requests committed
+                # (m11). `position` is the SETTLED position, so two
+                # same-bar pyramiding TRIGGERs on distinct intents each
+                # passed on their own while their SUM breached
+                # `max_abs_position`.
+                cause = self.guard.check_position(abs(position) + self._bar_committed_qty + a.qty, price)
             if cause is not None:
                 self._incident(out, "risk_refused", action=a.kind, intent=a.intent, qty=a.qty, cause=cause)
                 return False
+            if not a.reduce_only:
+                self._bar_committed_qty += a.qty
         return True
 
     def _market_legs(self, out: CoreOutput, s: SettleResult, price: float) -> list[ActionRequest]:
@@ -330,6 +390,34 @@ class LiveCore:
         dist = abs(price - rep.emulated.price) / price * 1e4 if rep is not None and price > 0 else 0.0
         return age, dist
 
+    def _horizon_ok(self, out: CoreOutput) -> bool:
+        """spec §2's `horizon_bars` consumption check, run BEFORE the
+        recompute this settlement would otherwise do (m7).
+
+        `horizon_bars` is the frozen `last_bar_index` the epoch's
+        `realtime_tail` pins `pine_last_bar_index()` to (spec §3.1), so
+        settling past it runs the engine with a `last_bar_index` BELOW the
+        actual last bar -- every `barstate`/`last_bar_index`-sensitive
+        script silently changes behaviour. Spec §2: "at 80% consumption
+        the runtime alerts and at 100% forces an epoch rotation before the
+        next settlement." The alert is one incident per crossing (not one
+        per bar); the rotation is `STOP(FLAT_ONLY)` plus a REFUSED settle
+        -- refusing is what "before the next settlement" means, and the
+        rotation itself is an operator ceremony (spec §6), not something
+        the core performs. Returns False when the settle must not run."""
+        state = self.guard.horizon(self.ledger.n + 1, self.spec.horizon_bars)
+        if state == "rotate":
+            self._incident(out, "horizon_exhausted", consumed=self.ledger.n + 1, horizon_bars=self.spec.horizon_bars)
+            self._raise(out, T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "horizon")
+            return False
+        if state == "alert":
+            if not self._horizon_alerted:
+                self._horizon_alerted = True
+                self._incident(out, "horizon_alert", consumed=self.ledger.n + 1, horizon_bars=self.spec.horizon_bars)
+        else:
+            self._horizon_alerted = False
+        return True
+
     def _observe_breakers(self, counters: dict[str, int]) -> list[tuple[str, bool, bool]]:
         """One G3 sample per settlement per breaker: a breaker's `name` IS
         the reconciler counter it watches, so the sample is "did that
@@ -347,13 +435,30 @@ class LiveCore:
         return out
 
     # --- lifecycle ---------------------------------------------------------------
-    def seed(self, history, expected_trades_sha256: str | None = None) -> CoreOutput:
+    def seed(self, history, expected_trades_sha256: str | None = None, *,
+             real_position: float | None = None, adopt_position: bool = False) -> CoreOutput:
         """Seed the ledger from `history` (spec §4 settle 1, the restart
         path). A `LedgerDivergence` -- a trades digest that does not
         reproduce, or a journal conflict against a previous incarnation --
         is STOP(HARD, HOLD) per spec §4.1: the recompute disagrees with a
         durable record, which is never something the runtime may trade
-        through."""
+        through.
+
+        `real_position` is the venue account's own position at seed time
+        (m6). Given, it anchors the fallback basis
+        (`our_signed_fills`) on the VENUE rather than on the recompute --
+        which is what a restart must do: a legitimate hold-flat state
+        (MIRROR_EARLY: venue 0, ledger +1, no STOP) re-anchored to the
+        ledger comes back as basis +1 against a real 0, i.e. an
+        `account_mismatch` STOP on the first settlement of a state the
+        uninterrupted run was carrying happily. Any carried residual has
+        the same shape.
+
+        A seed-time disagreement beyond the dead-band is spec §6's "cold
+        start with an existing position -> refuse unless
+        `--adopt-position`": `STOP(HARD, HOLD, "cold_start_position")` and
+        the seed is refused, unless `adopt_position` says the operator has
+        looked at it and wants the ledger's own view adopted."""
         out = CoreOutput()
         try:
             s = self.ledger.seed(history, expected_trades_sha256)
@@ -362,7 +467,18 @@ class LiveCore:
             self._incident(out, "ledger_divergence", cause=e.cause, detail=str(e.detail))
             return out
         self.book = s.book
-        self._our_fills = s.position_size
+        self._our_fills = s.position_size if real_position is None else real_position
+        if real_position is not None and not adopt_position and abs(real_position - s.position_size) > self.dead_band.qty(s.bar.c):
+            # The ledger itself committed before this check (it has to --
+            # the disagreement is only knowable once the recompute has a
+            # position to compare). What is refused is the SEED: `out.settle`
+            # stays None, which is the caller's "do not start trading"
+            # signal, and the process is HARD/HOLD until an operator either
+            # clears it or restarts with `adopt_position`.
+            self._raise(out, T.StopLevel.HARD, T.StopDisposition.HOLD, "cold_start_position")
+            self._incident(out, "cold_start_position", real_position=real_position,
+                           ledger_position=s.position_size, dead_band=self.dead_band.qty(s.bar.c))
+            return out
         out.settle, out.book = s, self.book
         return out
 
@@ -394,14 +510,18 @@ class LiveCore:
         silently settling a hole.
         """
         out = CoreOutput()
-        self.guard.begin_bar()
+        if not self._horizon_ok(out):
+            return out
+        prev = self.ledger.last
         try:
             s = self.ledger.settle(bar, now_ms)
         except BarsDivergence as e:
             # spec §4.1: a revised settled bar is a feed problem, not a
-            # divergent recompute -- FLAT_ONLY, not HARD. (The ledger has
-            # already journaled its own bars_divergence incident.)
-            self._incident(out, "bars_divergence", detail=str(e))
+            # divergent recompute -- FLAT_ONLY, not HARD. (n1: the LEDGER
+            # journals the `bars_divergence` incident row; this copy is
+            # returned to the caller only, so the durable record holds one
+            # row per revised bar, not two.)
+            out.incidents.append({"kind": "bars_divergence", "detail": str(e)})
             self._raise(out, T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "bars_divergence")
             return out
         except LedgerDivergence as e:
@@ -413,6 +533,26 @@ class LiveCore:
             # bar can be re-settled, so this is an incident, not a STOP.
             self._incident(out, "recompute_aborted", ts_open=bar.ts_open)
             return out
+        if s is prev:
+            # M1, spec §4.8: `Ledger.settle` returns the LAST settlement
+            # unchanged for a byte-identical re-delivery of the bar it
+            # already settled -- check mode's REST catch-up delivers one
+            # routinely. Re-running the whole settlement over it would
+            # emulate the bar's fills a second time against whatever
+            # `venue_fills` the driver passes (normally none, since they
+            # were consumed), classify them MISSED, reconcile again -- a
+            # DUPLICATE correction is real money -- append a second
+            # `reconciles` row for the bar, and reset `pending_market`
+            # from re-derived legs against a possibly stale
+            # `probe_fill_qty`. Nothing is classified, reconciled, asked
+            # for or journaled: the settlement already happened. The note
+            # is returned, not journaled -- a re-delivery is an expected
+            # event of the protocol, not an anomaly to alert on.
+            out.settle, out.book = s, self.book
+            out.incidents.append({"kind": "idempotent_redelivery", "bar_index": s.bar_index})
+            return out
+        self.guard.begin_bar()
+        self._bar_committed_qty = 0.0
         out.settle = s
 
         prev_book = self.book
@@ -427,10 +567,19 @@ class LiveCore:
                                   in_flight_intents=in_flight, mirrored_intents=mirrored, dead_band_qty=band,
                                   ledger_position=s.position_size, real_position=real_position,
                                   max_entry_slip_bps=self.rcfg.max_entry_slip_bps)
+        # M4(a): a MISSED the PREVIOUS decision declined to act on for a
+        # reason that can change is re-presented here, after this bar's own
+        # fills (fresher information first). `emulated_from_settle` emits
+        # bar-n fills only and `classify_bar` has no memory, so without
+        # this a MISSED skipped as non-quiescent simply vanished: nothing
+        # aged it, nothing re-counted it, and `[r4]`'s "≤ 1 script bar old"
+        # bound could never bind because no pair ever read MISSED twice.
+        classified = classified + self._carried_missed
+        self._carried_missed = []
         out.classified = classified
 
         age, dist = self._missed_bounds(classified, s.bar_index, price)
-        self._roll_mirror_early_day(bar)
+        self._roll_day(bar)
         dec = reconcile(ReconcileInput(s.bar_index, classified, s.position_size, real_position, basis, price,
                                        quiescent=not in_flight, in_flight=in_flight, stop_level=self.stop.level,
                                        missed_age_bars=age, missed_distance_bps=dist, cfg=self.rcfg,
@@ -441,6 +590,20 @@ class LiveCore:
             self._raise(out, *dec.stop)
         if dec.skipped_cycle:
             self._incident(out, "cycle_skipped", bar_index=s.bar_index)
+        if CARRY_CAUSES & set(dec.counters):
+            self._carried_missed = [c for c in classified if c.cls is FillClass.MISSED]
+        # M4(b), spec §5.4: "else skip (bounded) and count toward
+        # disagree_twice". A driver whose actions never go terminal makes
+        # every settlement non-quiescent, and the reconciler then does
+        # NOTHING, bar after bar, with only a counter to show for it --
+        # `disagree_twice` is the declared bound on exactly that.
+        if "skipped_not_quiescent" in dec.counters:
+            self._not_quiescent_streak += 1
+            if self._not_quiescent_streak >= self.limits.disagree_twice:
+                self._incident(out, "disagree_twice", settles=self._not_quiescent_streak)
+                self._raise(out, T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "disagree_twice")
+        else:
+            self._not_quiescent_streak = 0
         for name, breached, alerting in self._observe_breakers(dec.counters):
             if breached:
                 self._incident(out, "g3_breached", breaker=name)
@@ -448,12 +611,30 @@ class LiveCore:
             elif alerting:
                 self._incident(out, "g3_alert", breaker=name)
 
-        for a in self._requests(out, s, dec, classified, price, prev_book, in_flight, mirrored):
+        capped = False
+        for a in self._requests(out, s, dec, classified, price, prev_book, in_flight, mirrored, real_position):
+            if a.kind in RECONCILING_KINDS and self.reconciles_today >= self.limits.max_daily_reconciles:
+                # m8, spec §5.5: `max_daily_reconciles` is the low-n guard
+                # on corrections -- the G3 rate breakers are alert-only
+                # below their own `n_min`, so a runtime correcting every
+                # bar would reach no decidable rate for a year. Past the
+                # cap the cycle is SKIPPED, like any other refusal to act.
+                self._incident(out, "max_daily_reconciles", action=a.kind, intent=a.intent,
+                               today=self.reconciles_today, cap=self.limits.max_daily_reconciles)
+                capped = True
+                continue
             if self._permitted(out, a, s.position_size, price):
                 out.actions.append(a)
-        # The MARKET legs asked for at the next bar's open: that bar's
-        # `evaluate()` re-quotes them at the open rather than TRIGGERing
-        # the same fill a second time (see `evaluate`).
+                if a.kind in RECONCILING_KINDS:
+                    self.reconciles_today += 1
+        if capped and not dec.skipped_cycle:
+            self._incident(out, "cycle_skipped", bar_index=s.bar_index)
+        # The MARKET legs asked for at the next bar's open, as ADVANCE
+        # NOTICE: that bar's first `evaluate()` decides each one's fate
+        # with the open known -- confirmed at the same size (nothing to
+        # do), confirmed at another (a superseding `open_requote`), or not
+        # confirmed at all (a `qty=0` withdraw). See `evaluate` and
+        # `ActionRequest`'s supersede contract.
         self.pending_market = {(a.intent, "EXIT" if a.reduce_only else "ENTRY"): a
                                for a in out.actions if a.kind == "MARKET_AT_OPEN" and a.intent is not None}
         # The per-cycle reset (see `our_signed_fills`) needs BOTH sides
@@ -463,31 +644,87 @@ class LiveCore:
         # resetting to 0 there drove the next bar's basis to `-qty` (the
         # correction's own OURS fill) against a real position of 0, i.e. a
         # false `account_mismatch` STOP one bar after a correct repair.
-        if s.position_size == 0.0 and our_signed_fills is None and abs(self._our_fills) <= band:
+        # NEW-4: "the venue is flat" is the VENUE's own word
+        # (`real_position`), not our accumulator's. Guarding on `|basis|`
+        # made the accumulator sticky exactly when it was wrong: a
+        # liquidation/ADL flattens the venue while the accumulator still
+        # carries our position, so `|basis|` never fell inside the band,
+        # the reset never fired, and every later bar re-raised
+        # `account_mismatch` until an operator restart re-seeded.
+        if s.position_size == 0.0 and our_signed_fills is None and abs(real_position) <= band:
             self._our_fills = 0.0
+        self._journal_intents(out.book_diff)
         self.j.append_reconcile({"epoch_hash": self.spec.epoch_hash(), "bar_index": s.bar_index,
                                  "cause": ",".join(sorted(dec.counters)) or "clean",
                                  "detail_json": json.dumps(dec.counters, sort_keys=True)})
         return out
 
+    def _journal_intents(self, diff: dict[str, IntentState]) -> None:
+        """n9, spec §6: the settled book's own transitions, written to the
+        journal's `intents` table (`INSERT OR REPLACE` per
+        `(epoch, intent_key)`, so the row holds each intent's LATEST
+        state).
+
+        The book and its diff are the core's own product -- nothing else
+        derives them -- and B3 needs the durable copy to re-run a
+        journaled STOP's cancel step on restart (spec §6: "re-run a
+        journaled STOP's cancel step and non-widening check") without
+        first recomputing the ledger to find out what was resting. The
+        payload is the intent's own resting shape, which is what a mirror
+        sync compares against."""
+        for key, state in diff.items():
+            it = self.book.get(key)
+            payload = {"stop": it.stop, "limit": it.limit, "activation": it.activation, "is_long": it.is_long,
+                       "kind": it.kind, "qty": it.qty, "level_resolved": it.level_resolved,
+                       "content_hash": it.content_hash} if it is not None else {}
+            self.j.append_intent(self.spec.epoch_hash(), key, state.value, json.dumps(payload, sort_keys=True))
+
     def _advance_our_fills(self, ours_delta: float) -> float:
         self._our_fills += ours_delta
         return self._our_fills
 
-    def _roll_mirror_early_day(self, bar: T.NormalizedBar) -> None:
-        """`mirror_early_daily_cap` is a PER-DAY count (spec §5.4), so the
-        tally resets on the UTC-day boundary of the settled bar's own open
-        rather than growing for the life of the process."""
+    def _roll_day(self, bar: T.NormalizedBar) -> None:
+        """`mirror_early_daily_cap` and `max_daily_reconciles` are PER-DAY
+        counts (spec §5.4/§5.5), so both tallies reset on the UTC-day
+        boundary of the settled bar's own open rather than growing for the
+        life of the process."""
         day = bar.ts_open // DAY_MS
-        if self._mirror_early_day != day:
-            self._mirror_early_day, self.mirror_early_today = day, 0
+        if self._day != day:
+            self._day, self.mirror_early_today, self.reconciles_today = day, 0, 0
+
+    def _restore_day_counters(self) -> tuple[int, int]:
+        """Today's `mirror_early` count and reconciling-action count, read
+        back from the journaled `reconciles` rows (n12, m8).
+
+        Both are per-day CAPS, and a cap that restarts at zero with the
+        process is a cap an operator can launder by bouncing the runtime --
+        the very thing the mirror-early cap exists to prevent. Each row's
+        `detail_json` is that decision's own counter bag, so the day's
+        totals are a sum over it.
+
+        The day here is the WALL-CLOCK UTC day (`reconciles` rows carry
+        `created_ms`, not the settled bar's `ts_open`), while `_roll_day`
+        rolls on the bar's own day. The two agree in a live run, where bars
+        settle as they close; they can disagree when a tape is replayed
+        through the same journal, and the restore is then a bounded
+        over-count on the first bar -- conservative in the direction that
+        matters (the cap binds sooner, never later)."""
+        day_start = int(time.time() * 1000) // DAY_MS * DAY_MS
+        mirror_early = reconciling = 0
+        for row in self.j.rows("reconciles", "epoch_hash=? AND created_ms>=?", (self.spec.epoch_hash(), day_start)):
+            counters = json.loads(row["detail_json"] or "{}")
+            mirror_early += int(counters.get("mirror_early", 0))
+            reconciling += sum(int(counters.get(k, 0)) for k in RECONCILING_COUNTERS)
+        return mirror_early, reconciling
 
     def _requests(self, out: CoreOutput, s: SettleResult, dec: ReconcileDecision,
                   classified: list[ClassifiedFill], price: float, prev_book: dict[str, Intent],
-                  in_flight: set[str], mirrored: set[str]) -> list[ActionRequest]:
+                  in_flight: set[str], mirrored: set[str], real_position: float) -> list[ActionRequest]:
         """This settlement's candidate actions, in submission order:
-        engine-forced closes first, then the reconciler's corrections, then
-        the next open's MARKET legs, then stale-cycle cancels.
+        engine-forced closes and this bar's settle-only (POOC) fills
+        first, then the reconciler's corrections, then a HARD_FLAT if the
+        STOP now demands one, then the next open's MARKET legs, then
+        stale-cycle cancels.
 
         A correction's `reduce_only` is the RECONCILER's own (F1): a
         `MARKET_CORRECT` is exposure-increasing for a missed ENTRY and
@@ -500,18 +737,60 @@ class LiveCore:
         for c in classified:
             if c.cls == FillClass.SYNTHETIC and c.emulated is not None:
                 e = c.emulated
-                reqs.append(ActionRequest("SYNTHETIC_CLOSE", e.intent, _side_for_leg(e.is_long, "EXIT"), e.qty, None,
+                reqs.append(ActionRequest("SYNTHETIC_CLOSE", e.intent or SYNTHETIC_INTENT,
+                                          _side_for_leg(e.is_long, "EXIT"), e.qty, None,
                                           True, "SYNTHETIC", "engine-side close (margin call / intraday cap)", s.bar_index))
+            elif c.cls == FillClass.SETTLE_ONLY and c.emulated is not None:
+                # M5, spec §4 settle 6: "`process_orders_on_close` fills ->
+                # MARKET now". The order never rested in the settled book,
+                # so there is no MARKET leg to ask for at the next open and
+                # no venue counterpart to have missed -- the fill happened
+                # at THIS bar's close and the venue has to be taken there
+                # now. Routing it through the reconciler as MISSED instead
+                # made every POOC fill a repair (2% of bars on the corpus
+                # POOC probe -- straight through the spec's own 1% orphan
+                # breaker), gated it behind an age/distance/budget bound
+                # the spec does not put on it, and turned a same-bar POOC
+                # flip into `unreconcilable_sides` on the first cross.
+                e = c.emulated
+                reqs.append(ActionRequest("MARKET_NOW", e.intent, _side_for_leg(e.is_long, e.leg), e.qty, None,
+                                          e.leg == "EXIT", "MARKET",
+                                          "process_orders_on_close fill (spec §4 settle 6)", s.bar_index))
         for corr in dec.corrections:
             kind = "FLATTEN" if corr.kind == "FLATTEN" else "CORRECTION"
             reqs.append(ActionRequest(kind, corr.intent, corr.side, corr.qty, None, corr.reduce_only, corr.kind,
                                       corr.reason, s.bar_index))
+        # M3, spec §5.5(c): "under FLATTEN: one reduce-only HARD_FLAT
+        # MARKET to the venue-reported position, then only cancels". This
+        # is the ONE order the reconciler cannot emit -- it is not a
+        # correction toward the ledger but the STOP's own disposition
+        # acting on venue truth -- and without it an ADL/manual/partial
+        # liquidation left the remaining venue position sitting under
+        # HARD, where `permits()` allows no new reduce-only order except
+        # this one, indefinitely. Emitted once: `_hard_flat_issued` is
+        # journaled as an incident so a restart re-issues only if the
+        # venue still holds a position.
+        if (self.stop.disposition is T.StopDisposition.FLATTEN and real_position != 0.0
+                and not any(a.kind == "FLATTEN" for a in reqs)):
+            if not self._hard_flat_issued:
+                self._hard_flat_issued = True
+                self._incident(out, "hard_flat", qty=abs(real_position), cause=self.stop.cause)
+                reqs.append(ActionRequest("FLATTEN", None, T.Side.SELL if real_position > 0 else T.Side.BUY,
+                                          abs(real_position), None, True, "HARD_FLAT", self.stop.cause, s.bar_index))
         reqs += self._market_legs(out, s, price)
         # spec §5.2 stale-cycle cancels. `book_diff` reads CANCELLED for an
         # order that FILLED as well as one that genuinely left the book
         # (see `IntentState`); the bar's own emulated fills disambiguate, so
         # a filled order is never chased with a cancel.
-        filled = {e.intent for c in classified if (e := c.emulated) is not None}
+        # m3: VENUE truth, not ledger truth. `book_diff` reads CANCELLED
+        # for an order that FILLED as well as one that left the book
+        # unfilled, and the bar's own fills disambiguate -- but only a
+        # fill the VENUE reported proves the venue is no longer holding
+        # the order. A mirrored exit the ledger filled and the venue did
+        # not (MISSED, being repaired by a MARKET_CORRECT) is exactly the
+        # resting `closePosition` order that must be chased with a cancel,
+        # or it fires again on the next cycle's position.
+        filled = {c.emulated.intent for c in classified if c.venue is not None and c.emulated is not None}
         placed = in_flight | mirrored
         for k, state in out.book_diff.items():
             if state != IntentState.CANCELLED:
@@ -543,17 +822,28 @@ class LiveCore:
 
         A `(intent, leg)` the preceding settlement already asked for as a
         `MARKET_AT_OPEN` (spec §4 settle 6 -- the same fill, seen from the
-        other side of the bar boundary) is not TRIGGERed again, but it is
-        not dropped either: this is the "next `evaluate()` with the open
-        known" the spec sizes that order at, so the first evaluate of the
-        target bar re-quotes it as a SUPERSEDING `MARKET_AT_OPEN` carrying
-        the ENGINE's qty at the open (`reason="open_requote"`; see
-        `ActionRequest`'s supersede contract). The settle-time request
-        stands as the advance notice B3 needs to have an order in place at
-        the open; the requote is what fixes its SIZE, which for partition-3
-        (`AT_FILL` default) sizing is priced at the open and cannot be
-        re-derived by B3 afterwards (the handle's accessors describe its
-        LAST run).
+        other side of the bar boundary) is not TRIGGERed again. This is
+        the "next `evaluate()` with the open known" the spec sizes that
+        order at, so the FIRST evaluate of the target bar settles the
+        advance's fate three ways (m5/F6; see `ActionRequest`'s supersede
+        contract):
+
+          * the engine's qty at the open differs from the settle-time
+            close proxy by more than the dead band -> a superseding
+            `MARKET_AT_OPEN` with the real qty (`reason="open_requote"`),
+            which for partition-3 (`AT_FILL` default) sizing B3 cannot
+            re-derive afterwards (the handle's accessors describe its LAST
+            run);
+          * the two agree -> nothing: the advance already carries the
+            right size, and re-quoting would cost an order op for nothing;
+          * the probe confirms no fill for the key at all -> a `qty=0`
+            withdraw, because the engine's admission gate refused the
+            order at the open and the ledger will never book it (see
+            `_withdraw_unconfirmed`).
+
+        A requote/withdraw is NOT counted against
+        `max_fill_actions_per_bar`: it amends an order the settlement
+        already counted, gated and placed.
 
         The per-bar fill-action budget is NOT reset here (`settle()` owns
         `begin_bar()`), so it spans the whole bar's tick stream; a
@@ -566,10 +856,12 @@ class LiveCore:
         pr = self.probe.evaluate(forming, now_ms, journal=self.j)
         out.probe = pr
         out.book = self.book
-        if self._triggered_bar != pr.bar_index:
+        first_evaluate = self._triggered_bar != pr.bar_index
+        if first_evaluate:
             self._triggered_bar, self._triggered = pr.bar_index, set()
         position = self.ledger.last.position_size if self.ledger.last is not None else 0.0
         price = forming.c
+        band = self.dead_band.qty(price)
         for f in pr.fills:
             key = (f.intent, f.leg)
             if key in self._triggered:
@@ -584,6 +876,13 @@ class LiveCore:
                 continue
             pending = self.pending_market.get(key)
             requote = pending is not None and pending.target_bar_index == pr.bar_index
+            if requote and abs(f.qty - pending.qty) <= band:
+                # F6: the advance already carries the right size -- the
+                # settle-time close proxy and the engine's own qty at the
+                # open agree within the dead band -- so there is nothing to
+                # amend and re-quoting would only cost an order op.
+                self._triggered.add(key); self.pending_market.pop(key, None)
+                continue
             reduce_only = pending.reduce_only if requote else f.leg == "EXIT"
             a = ActionRequest("MARKET_AT_OPEN" if requote else "TRIGGER", f.intent,
                               _side_for_leg(f.is_long, f.leg), f.qty, None if requote else f.price, reduce_only,
@@ -592,20 +891,64 @@ class LiveCore:
                               pr.bar_index)
             if not self._permitted(out, a, position, price):
                 self._triggered.add(key)
+                if requote:
+                    # NEW-2: the advance was gated and emitted at settle(n)
+                    # and is standing at the venue. Journaling "refused"
+                    # and emitting nothing would leave an order the record
+                    # says was refused to fill anyway. A cancel is always
+                    # permitted, and under a STOP it is the right outcome:
+                    # a MISSED entry next bar is the reconciler's to budget.
+                    self.pending_market.pop(key, None)
+                    out.actions.append(ActionRequest("CANCEL_STALE_CYCLE", f.intent, T.Side.BUY, 0.0, None, False,
+                                                     "CANCEL", "open_requote refused; the settled advance must not stand",
+                                                     pr.bar_index))
                 continue
-            try:
-                self.guard.count_fill_action()
-            except RiskViolation as e:
-                # F9: mark the key so the exhausted budget is reported ONCE
-                # per key per bar -- the probe re-reports the same confirmed
-                # fill on every remaining tick of the bar, and each one used
-                # to re-count, re-journal and re-`_raise` it.
-                self._triggered.add(key)
-                self._incident(out, "risk_violation", detail=str(e), bar_index=pr.bar_index)
-                self._raise(out, T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, str(e))
-                break
+            if not requote:
+                # NEW-3: a requote AMENDS an order this bar's settlement
+                # already counted, gated and placed -- counting it again
+                # would make a two-leg reversal need a budget of 4 where
+                # spec §4's invariant is "<= P's fill count".
+                try:
+                    self.guard.count_fill_action()
+                except RiskViolation as e:
+                    # F9: mark the key so the exhausted budget is reported ONCE
+                    # per key per bar -- the probe re-reports the same confirmed
+                    # fill on every remaining tick of the bar, and each one used
+                    # to re-count, re-journal and re-`_raise` it.
+                    self._triggered.add(key)
+                    self._incident(out, "risk_violation", detail=str(e), bar_index=pr.bar_index)
+                    self._raise(out, T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, str(e))
+                    break
             self._triggered.add(key)
+            if requote:
+                self.pending_market.pop(key, None)
             out.actions.append(a)
+        if first_evaluate and not pr.aborted:
+            self._withdraw_unconfirmed(out, pr.bar_index)
         for f in pr.retracted:
             self._incident(out, "probe_retract", intent=f.intent, leg=f.leg, bar_index=pr.bar_index)
         return out
+
+    def _withdraw_unconfirmed(self, out: CoreOutput, bar_index: int) -> None:
+        """m5: every `MARKET_AT_OPEN` the preceding settlement asked for in
+        advance that the FIRST `evaluate()` of its target bar did not
+        confirm is superseded by a `qty=0` request (`reason="withdraw"`).
+
+        The advance is priced off bar n's close because that is the only
+        price `settle(n)` has; spec §4 settle 6 puts the real order "at the
+        next `evaluate()` with the open known". If the engine's admission
+        gate then refuses it at the open -- qty 0, a margin refusal, a
+        sizing rule that no longer admits the order -- the probe reports no
+        fill for that key and the ledger will never book one. Left standing,
+        the advance is an order at the venue with no counterpart on the
+        ledger: it fills, classifies RETRACTED at the next settlement, and
+        STOPs a run that was never wrong. Withdrawing it is the same
+        supersede contract the requote uses (`ActionRequest`), so B3 needs
+        no second mechanism: the last request for the key wins, and a
+        `qty=0` one means "do not place it"."""
+        for key, pending in list(self.pending_market.items()):
+            if pending.target_bar_index != bar_index:
+                continue
+            del self.pending_market[key]
+            out.actions.append(ActionRequest("MARKET_AT_OPEN", pending.intent, pending.side, 0.0, None,
+                                             pending.reduce_only, "MARKET", "withdraw", bar_index))

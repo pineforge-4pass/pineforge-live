@@ -38,3 +38,17 @@ def test_feed(engine_root: Path) -> Path:
     if not p.exists():
         pytest.skip("derived 15m feed missing; run scripts/build_engine.sh")
     return p
+
+@pytest.fixture(scope="session")
+def test_so_pooc(engine_root: Path) -> Path:
+    """The corpus POOC probe (`order-deferred-flip-pooc-cross-bar-01`):
+    `process_orders_on_close=true`, so its `strategy.close` market exit
+    fires at the SAME bar's close -- the one corpus fixture that produces
+    spec §4 settle 6's "`process_orders_on_close` fills -> MARKET now"
+    (M5). Its directory carries no `inputs.json`, so like the other two it
+    runs on the default 15m ETH-USDT feed and the same `"TAPE"` syminfo."""
+    hits = glob.glob(str(engine_root / "corpus/validation/order-deferred-flip-pooc-cross-bar-01/strategy.*"))
+    hits = [h for h in hits if h.endswith((".dylib", ".so"))]
+    if not hits:
+        pytest.skip("corpus strategy library not built; run scripts/build_engine.sh")
+    return Path(hits[0])
