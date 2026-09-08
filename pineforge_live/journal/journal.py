@@ -100,6 +100,14 @@ class Journal:
         existed = path.exists()
         if not create and not existed:
             raise JournalFault(f"journal {path} does not exist")
+        # N8: a refused open (bad PRAGMA, or verify_tail's JournalCorrupt on
+        # a torn tail) must not leak the sqlite3.Connection -- the operator
+        # is about to act on the refusal (fix the file, restore a backup),
+        # and a live connection holding the WAL open behind that refusal is
+        # exactly the kind of thing that turns a clean recovery into a
+        # locked/busy file. `con` is closed on every path out of this try
+        # except the one that returns successfully below.
+        con = None
         try:
             con = sqlite3.connect(path, isolation_level=None)
             mode = con.execute("PRAGMA journal_mode=WAL").fetchone()[0]
@@ -110,17 +118,26 @@ class Journal:
             if int(sync) != 2:
                 raise JournalFault(f"synchronous=FULL not honored for {path} (synchronous={sync!r})")
             con.executescript(DDL)
+            journal = cls(con, path)
+            if existed:
+                # A journal that already existed on disk -- whether opened
+                # via the runtime's normal "open or create" call
+                # (create=True, the default) or explicitly reopened
+                # (create=False, the restart path) -- must never be trusted
+                # without checking its last row first (finding 6:
+                # create=True on an existing file used to skip this).
+                journal.verify_tail()
         except sqlite3.Error as e:
+            if con is not None:
+                con.close()
             raise JournalFault(str(e)) from e
-        journal = cls(con, path)
-        if existed:
-            # A journal that already existed on disk -- whether opened via
-            # the runtime's normal "open or create" call (create=True, the
-            # default) or explicitly reopened (create=False, the restart
-            # path) -- must never be trusted without checking its last row
-            # first (finding 6: create=True on an existing file used to
-            # skip this).
-            journal.verify_tail()
+        except Exception:
+            # JournalFault (bad PRAGMA) and JournalCorrupt/StopMarkerPresent
+            # (verify_tail) are not sqlite3.Error -- catch everything else
+            # here so no exception path leaves `con` open.
+            if con is not None:
+                con.close()
+            raise
         return journal
 
     def close(self):
@@ -186,7 +203,14 @@ class Journal:
         coerce/store it (REAL/INTEGER affinity) -- without touching `table`
         itself or requiring its natural key to be free. Used to compare a
         conflicting append against the row already on disk on an
-        apples-to-apples (both post-coercion) basis (finding 4/5)."""
+        apples-to-apples (both post-coercion) basis (finding 4/5).
+
+        N9: the scratch TEMP table is built via `CREATE ... AS SELECT ...
+        WHERE 0`, which copies column affinity but not `DEFAULT`/`NOT
+        NULL` -- a column the caller omits comes back `None` here even if
+        `table` declares a non-NULL default for it, which a comparison
+        against the stored row (which does carry the default) will then
+        judge as a conflict."""
         scratch = f"_scratch_{table}"
         self._exec(f"CREATE TEMP TABLE IF NOT EXISTS {scratch} AS SELECT * FROM {table} WHERE 0")
         cols = list(row); placeholders = ",".join("?" for _ in cols)
@@ -209,6 +233,14 @@ class Journal:
         already exists (finding 5): a byte-for-byte idempotent re-append
         (same checksum domain, ignoring the append-time created_ms) returns
         the existing row quietly; a row that differs raises JournalConflict.
+
+        N10: `self.con` uses `isolation_level=None` (SQLite's implicit
+        transaction handling disabled), which invites a caller to wrap its
+        own `BEGIN`/`COMMIT` around several journal calls -- but nested use
+        is unsupported: calling this from inside a caller-opened
+        transaction fails loud with `JournalFault: cannot start a
+        transaction within a transaction` at the `BEGIN IMMEDIATE` below,
+        leaving the caller's own transaction untouched (not rolled back).
         """
         row = dict(row)
         row.setdefault("created_ms", _now())
@@ -252,6 +284,15 @@ class Journal:
         raise JournalConflict(f"{table}: conflicting row for {key}")
 
     def rows(self, table: str, where: str, params) -> list[dict[str, Any]]:
+        """N7: hash columns (HEX_HASH_COLUMNS) come back DECODED to Python
+        `int` here, not the hex TEXT actually stored -- so `checksum(row)`
+        recomputed from a `rows()` result will not match the stored
+        checksum (the domain diverges from what was hashed at insert time).
+        This is not a defect of `verify_tail`, which reads the raw
+        `SELECT *` row; it is the API contract of `rows`/`settlement`/
+        `last_settlement`. To verify a specific row's checksum, use
+        `verify_tail()` (last row of every checksummed table) rather than
+        recomputing from these readers' output."""
         return [_decode_hashes(dict(r)) for r in self._exec(f"SELECT * FROM {table} WHERE {where} ORDER BY rowid", tuple(params))]
 
     # --- writers ----------------------------------------------------------------
@@ -260,6 +301,15 @@ class Journal:
     def append_runtime_config(self, h: str, config_json: str):
         self._insert("runtime_configs", {"runtime_config_hash": h, "config_json": config_json}, or_ignore=True)
     def append_bar(self, epoch_hash: str, bar: T.NormalizedBar, bars_hash: int) -> dict[str, Any]:
+        """N6/finding 5 design note: `(epoch_hash, ts_open)` is the natural
+        key. A byte-for-byte idempotent re-append of the same bar is
+        silently accepted; a *Revised* bar -- same key, different OHLCV --
+        raises JournalConflict BY DESIGN, it does not overwrite the stored
+        row. A Revised settled bar is not this layer's call to make: per
+        spec §4.1 it is an incident + STOP(FLAT_ONLY), so the runtime (B2)
+        must catch JournalConflict here, journal it via
+        `append_incident("bars_divergence", ...)`, and never attempt to
+        rewrite the bar through this method."""
         return self._insert_checksummed(
             "bars",
             {"epoch_hash": epoch_hash, "ts_open": bar.ts_open, "o": bar.o, "h": bar.h, "l": bar.l, "c": bar.c,
@@ -319,17 +369,21 @@ class Journal:
         self._insert("incidents", {"kind": kind, "detail_json": json.dumps(detail, sort_keys=True)})
     def append_stop(self, level: str, disposition: str, cause: str):
         self._insert("stops", {"level": level, "disposition": disposition, "cause": cause})
-    def append_stop_cleared(self, cause: str) -> None:
-        """Finding 12: StopMarker.clear() has no journal handle to write
+    def append_stop_cleared(self, cause: str) -> bool:
+        """Finding 12/N5: StopMarker.clear() has no journal handle to write
         through, so the runtime calls this afterward to leave a journal
-        trace of the operator's clear -- `cleared_ms` on the latest still-open
-        (cleared_ms IS NULL) `stops` row. `cause` is accepted for symmetry
-        with append_stop/callers that want to log why it was cleared, even
-        though today's `stops` schema has nowhere else to put it."""
-        self._exec(
-            "UPDATE stops SET cleared_ms=? WHERE id=(SELECT id FROM stops WHERE cleared_ms IS NULL ORDER BY id DESC LIMIT 1)",
-            (_now(),),
+        trace of the operator's clear -- `cleared_ms` AND `cleared_cause` on
+        the latest still-open (cleared_ms IS NULL) `stops` row, so who/why
+        is auditable rather than discarded. Returns True when a row was
+        actually cleared, False (never a raise) when there is no open stop
+        to clear -- calling this when nothing is open, or a second time
+        after someone else already cleared it, is a query the caller can
+        act on, not a fault."""
+        cur = self._exec(
+            "UPDATE stops SET cleared_ms=?, cleared_cause=? WHERE id=(SELECT id FROM stops WHERE cleared_ms IS NULL ORDER BY id DESC LIMIT 1)",
+            (_now(), cause),
         )
+        return cur.rowcount > 0
     def append_check(self, fencing_token: int, lease_expiry_ms: int, row: dict[str, Any] | None = None):
         self._insert("checks", {"fencing_token": fencing_token, "lease_expiry_ms": lease_expiry_ms, "row_json": json.dumps(row or {}, sort_keys=True)})
 
@@ -358,6 +412,18 @@ class Journal:
         return [dict(r) for r in self._exec(sql).fetchall()]
     def max_fencing_token(self) -> int:
         r = self._exec("SELECT COALESCE(MAX(fencing_token),0) AS m FROM checks").fetchone(); return int(r["m"])
+    def live_check(self, now_ms: int) -> dict[str, Any] | None:
+        """N4: the `checks` table is the durable record of every lease ever
+        granted -- unlike the lock file, it cannot be deleted by an
+        operator or a tmp cleaner out from under a live holder.
+        FencedLease.acquire() consults this in addition to the lock file so
+        a lease stays enforced even when its lock file is gone: the
+        highest-token row whose lease_expiry_ms is still in the future
+        (i.e. not yet renewed-away or expired), or None if none is live."""
+        r = self._exec(
+            "SELECT * FROM checks WHERE lease_expiry_ms > ? ORDER BY fencing_token DESC LIMIT 1", (now_ms,)
+        ).fetchone()
+        return dict(r) if r else None
 
     def verify_tail(self):
         """Spec §6: the last row of every checksummed table must verify, else refuse.

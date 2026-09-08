@@ -54,6 +54,18 @@ class FencedLease:
             cur = self._read()
             if cur and cur.get("expiry_ms", 0) > now_ms:
                 raise LeaseHeld(f"lease token {cur.get('token')} live until {cur['expiry_ms']}")
+            # N4: the lock file alone is not the source of truth -- it can be
+            # deleted (operator, a /tmp cleaner) while its lease is still
+            # live. The journal's own `checks` table survives that, so a
+            # live row there (lease_expiry_ms > now_ms) refuses acquire()
+            # exactly as a live lock file would, closing finding 9's
+            # residual gap.
+            live = self.journal.live_check(now_ms)
+            if live is not None:
+                raise LeaseHeld(
+                    f"fencing token {live['fencing_token']} live in checks until {live['lease_expiry_ms']} "
+                    "(lock file missing/stale)"
+                )
             # Token continuity: even when the lock file is absent/empty/stale (a
             # previous journal's leftover), never hand out a token the journal has
             # already recorded — take the max of the journal's own high-water mark

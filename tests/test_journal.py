@@ -327,3 +327,110 @@ def test_open_default_create_true_verifies_existing_journal(tmp_path):
     con = sqlite3.connect(p); con.execute("UPDATE settlements SET equity = equity + 1"); con.commit(); con.close()
     with pytest.raises(JournalCorrupt):
         Journal.open(p)  # create=True default
+
+
+# --- re-review fix wave 2 (task-4-rereview.md N1-N10) ------------------------
+
+def test_prepare_over_a_set_marker_raises_and_leaves_it_untouched(tmp_path):
+    # N1: prepare() must never disarm a SET marker -- the natural startup
+    # order "arm the sidecar, then open the journal" must not silently
+    # clobber an unacknowledged STOP.
+    m = StopMarker(tmp_path / "j.sqlite3.stop")
+    m.prepare()
+    m.write("HARD", "HOLD", "journal fault")
+    assert m.exists()
+    with pytest.raises(StopMarkerPresent):
+        m.prepare()
+    assert m.exists() and m.read()["level"] == "HARD"  # untouched
+
+def test_prepare_over_a_torn_marker_raises_and_preserves_the_evidence(tmp_path):
+    # N1: a torn marker is itself evidence of an in-flight STOP write --
+    # prepare() must not erase it either.
+    m = StopMarker(tmp_path / "j.sqlite3.stop")
+    m.prepare()
+    fd = os.open(m.path, os.O_WRONLY)
+    try:
+        os.pwrite(fd, b"{\"level\": ", 0)  # torn, not valid JSON
+    finally:
+        os.close(fd)
+    with pytest.raises(StopMarkerPresent):
+        m.prepare()
+    r = m.read()
+    assert r is not None and r.get("unreadable") is True
+
+def test_prepare_over_an_armed_marker_is_a_noop_and_idempotent(tmp_path):
+    # N1: an armed (all-zero, preallocated-but-unset) marker is the state
+    # prepare() itself produces -- calling it again must be a true no-op,
+    # not a rewrite, and calling it a third time must behave identically.
+    m = StopMarker(tmp_path / "j.sqlite3.stop")
+    m.prepare()
+    assert not m.exists() and os.path.getsize(m.path) == 4096
+    m.prepare()
+    assert not m.exists() and os.path.getsize(m.path) == 4096
+    m.prepare()
+    assert not m.exists() and os.path.getsize(m.path) == 4096
+
+def test_write_without_prepare_still_produces_a_durable_marker(tmp_path):
+    # N2: the emergency STOP path cannot depend on prepare() having been
+    # called (no runtime caller is wired up yet) or having succeeded.
+    m = StopMarker(tmp_path / "j.sqlite3.stop")
+    assert not m.path.exists()
+    m.write("HARD", "HOLD", "no prepare() call happened")
+    assert m.exists()
+    assert os.path.getsize(m.path) == 4096
+    assert m.read()["level"] == "HARD"
+
+def test_acquire_consults_checks_table_when_lock_file_is_deleted(tmp_path):
+    # N4: the lock file alone is not authoritative -- it can be deleted
+    # (operator, a /tmp cleaner) while its lease is still live in the
+    # journal's own `checks` table.
+    j = Journal.open(tmp_path / "j.sqlite3")
+    lock = tmp_path / "j.lock"
+    a = FencedLease(lock, j)
+    a.acquire(lease_ms=10_000, now_ms=0)  # expiry 10_000
+    lock.unlink()
+    b = FencedLease(lock, j)
+    with pytest.raises(LeaseHeld):
+        b.acquire(lease_ms=10_000, now_ms=1_000)  # a's lease is still live in `checks`
+    j.close()
+
+def test_append_stop_cleared_records_cause_and_reports_when_nothing_open(tmp_path):
+    # N5: `cause` used to be accepted and discarded, and a no-open-stop call
+    # returned normally with no signal either way.
+    j = Journal.open(tmp_path / "j.sqlite3")
+    assert j.append_stop_cleared("nothing to clear") is False
+    j.append_stop("HARD", "HOLD", "journal fault")
+    assert j.append_stop_cleared("operator investigated, resumed") is True
+    row = j.rows("stops", "1=1", ())[0]
+    assert row["cleared_ms"] is not None
+    assert row["cleared_cause"] == "operator investigated, resumed"
+    assert j.append_stop_cleared("already cleared") is False  # no open stop left
+    j.close()
+
+def test_refused_open_closes_its_connection_before_raising(tmp_path, monkeypatch):
+    # N8: verify_tail()'s JournalCorrupt on a torn tail used to propagate
+    # with the sqlite3.Connection still open -- the WAL file staying open
+    # right when the operator is about to act on the refusal.
+    p = tmp_path / "j.sqlite3"
+    j = Journal.open(p); j.append_epoch("e1", "{}"); j.append_settlement(settlement(1)); j.close()
+    con = sqlite3.connect(p); con.execute("UPDATE settlements SET equity = equity + 1"); con.commit(); con.close()
+
+    opened: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+    def spy_connect(*a, **kw):
+        c = real_connect(*a, **kw)
+        opened.append(c)
+        return c
+    monkeypatch.setattr(sqlite3, "connect", spy_connect)
+
+    with pytest.raises(JournalCorrupt):
+        Journal.open(p, create=False)
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")  # closed by Journal.open, not leaked
+
+    monkeypatch.undo()
+    # The refusal does not leave the file locked/open behind it: fixing the
+    # row and reopening still works.
+    con = sqlite3.connect(p); con.execute("UPDATE settlements SET equity = equity - 1"); con.commit(); con.close()
+    Journal.open(p, create=False).close()
