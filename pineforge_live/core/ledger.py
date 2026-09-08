@@ -2,13 +2,19 @@
 from __future__ import annotations
 import math, time
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Sequence, TYPE_CHECKING
 from pineforge_live import types as T
 from pineforge_live.bars.builder import bars_hash as roll_hash, compare_bar
 from pineforge_live.bars.policy import tf_ms
 from pineforge_live.engine.report import RunResult, TradeRow
 from pineforge_live.journal import JournalConflict
 from .ids import TradeKey, trade_keys
+
+if TYPE_CHECKING:
+    # Type-checking only (see `Ledger._settled_book`): the runtime import is
+    # lazy, inside the method, to sidestep a module-import cycle with
+    # `.book` while Task 5/8's `classify.py`/`probe.py` are still landing.
+    from .book import Intent
 
 
 class LedgerDivergence(RuntimeError):
@@ -102,6 +108,18 @@ class SettleResult:
     when the bar-n closed trades above don't already account for all of it
     (a still-open entry, or an exit that reduced but didn't close a
     position) -- see `Ledger._result`. Always empty on `seed()`.
+
+    `book` is this settlement's resting-intent book (spec §4 settle 5):
+    `core.book.settled_book(handle, this_run's_RunResult)`, captured by
+    `Ledger._settled_book` IMMEDIATELY after the `run_full()` that produced
+    this `SettleResult` -- the ONLY moment `handle.effective_levels`/
+    `handle.level_resolved` are guaranteed to still describe THIS run (see
+    `settled_book`'s own docstring: those accessors read the handle's LAST
+    run, and go stale the instant any later `run_full` executes). Once
+    captured, `book`'s `Intent`s are plain frozen dataclasses holding
+    already-resolved values -- not a live view into the handle -- so it
+    stays valid (and unchanged) across any number of subsequent runs on
+    the same handle.
     """
     bar_index: int; bar: T.NormalizedBar; trades: list[TradeRow]; keys: list[TradeKey]
     new_closed: list[TradeKey]; new_opened: list[TradeKey]; hashes: list[int]
@@ -109,6 +127,7 @@ class SettleResult:
     pending_orders: list[dict[str, Any]]; cycle_seq: int; trail_best: float | None
     recompute_ms: int; trades_sha256: str
     position_delta: float; prev_position_size: float; entry_fills: list[dict[str, Any]]
+    book: dict[str, "Intent"]
 
 
 def _mtm(r: RunResult, close: float) -> float:
@@ -159,7 +178,22 @@ class Ledger:
             raise RecomputeAborted("settle recompute aborted")
         return r, int((time.perf_counter() - t0) * 1000)
 
-    def _result(self, bars: list[T.NormalizedBar], r: RunResult, ms: int, prev: SettleResult | None) -> SettleResult:
+    def _settled_book(self, r: RunResult) -> dict[str, "Intent"]:
+        """Computes `core.book.settled_book(self.h, r)` -- MUST be called
+        immediately after the `_run()` that produced `r`, before `self.h`
+        runs anything else: `settled_book` reads `effective_levels`/
+        `level_resolved`, which describe the handle's LAST run only (see
+        its docstring). `seed()`/`settle()` both call this right after
+        `_run()` and before doing anything further with `self.h` -- this
+        is the ONLY valid moment to capture a `SettleResult`'s book; a
+        later call would silently read a stale or unrelated run's mirror.
+        Imported lazily to sidestep a module-import cycle with `.book`.
+        """
+        from .book import settled_book
+        return settled_book(self.h, r)
+
+    def _result(self, bars: list[T.NormalizedBar], r: RunResult, ms: int, prev: SettleResult | None,
+                book: dict[str, "Intent"]) -> SettleResult:
         """Builds this run's `SettleResult` from the engine's `RunResult`
         over the (still-staged) full `bars`. Enforces the hash_len
         invariant (`len(r.broker_state_hash) == len(bars)`, review finding
@@ -198,7 +232,17 @@ class Ledger:
             explained = sum(sign(k) for k in keys if k.entry_bar == n) - sum(sign(k) for k in keys if k.exit_bar == n)
             unexplained = position_delta - explained
             if abs(unexplained) > 1e-12:
-                leg = "ENTRY" if abs(r.position_size) > abs(prev_position_size) else "EXIT"
+                # N1 fix (review): decide ENTRY vs EXIT by DIRECTION, not
+                # magnitude -- `pos` is the bar's NEW (post-run) position
+                # size. An unexplained delta that moves TOWARD the final
+                # position is an entry in that (the final) direction;
+                # anything else -- including a reversal's old-side exit,
+                # which used to be misjudged an ENTRY of the new side by
+                # comparing |position_size| -- reduces the previous
+                # position and is an EXIT of the OLD side, priced at the
+                # bar's close (no avg price survives a fully-closed side).
+                pos = r.position_size
+                leg = "ENTRY" if pos != 0.0 and (unexplained > 0) == (pos > 0) else "EXIT"
                 entry_fills.append({
                     "leg": leg,
                     "is_long": (unexplained > 0) if leg == "ENTRY" else (prev_position_size > 0),
@@ -210,7 +254,7 @@ class Ledger:
         return SettleResult(n, bars[-1], r.trades, keys, [k for k in keys if k.exit_bar == n], [k for k in keys if k.entry_bar == n],
                             r.broker_state_hash, r.position_size, avg_price, r.current_equity, _mtm(r, bars[-1].c),
                             r.pending_orders, r.position_cycle_seq, None if math.isnan(r.trail_best_price) else r.trail_best_price,
-                            ms, keys_sha256(keys), position_delta, prev_position_size, entry_fills)
+                            ms, keys_sha256(keys), position_delta, prev_position_size, entry_fills, book)
 
     def _settlement_row(self, s: SettleResult, bars_hash: int) -> dict[str, Any]:
         return {"bar_index": s.bar_index, "epoch_hash": self.spec.epoch_hash(), "runtime_config_hash": self.rc_hash,
@@ -247,6 +291,21 @@ class Ledger:
         `settle()` distinguishes bar vs. settlement conflicts because it
         has the additional "revised settled bar" case to rule out.
 
+        N2 fix (review): a conflicting `settlements` row for this
+        `bar_index` is checked for BEFORE anything is journaled -- the
+        journal can't wrap the bar + settlement writes in one transaction
+        (finding 3's cross-check exists precisely because of that), so
+        writing the bar row first (the old order) could leave a POISON
+        `bars` row behind (this seed's -- possibly a shifted/wrong-chain
+        history's -- `bars_hash` for a `ts_open` the true history has not
+        reached yet) even though the settlement row goes on to conflict
+        and this whole `seed()` call fails. That leftover then breaks the
+        CORRECT history's later `settle()` for the same `ts_open`: same
+        OHLCV, different `bars_hash`, so it reads as a revised bar
+        (`BarsDivergence` + a bogus incident) instead of what it is, a
+        crumb from a previously refused seed. Pre-checking means a
+        refused seed leaves NOTHING behind to clean up.
+
         Like `settle()`, the ledger's own state (`self.bars`/`bars_hash`/
         `last`) is only assigned after the journal write succeeds, so a
         failed seed leaves the ledger unseeded (retryable) rather than
@@ -259,9 +318,16 @@ class Ledger:
         for b in bars:
             bh = roll_hash(bh, b)
         r, ms = self._run(bars)
-        s = self._result(bars, r, ms, None)
+        book = self._settled_book(r)
+        s = self._result(bars, r, ms, None, book)
         if expected_trades_sha256 is not None and s.trades_sha256 != expected_trades_sha256:
             raise LedgerDivergence("seed_mismatch", {"expected": expected_trades_sha256, "got": s.trades_sha256})
+        existing = self.j.settlement(self.spec.epoch_hash(), s.bar_index)
+        if existing is not None:
+            expected_row = self._settlement_row(s, bh)
+            if any(existing.get(k) != v for k, v in expected_row.items()):
+                key = {"epoch_hash": self.spec.epoch_hash(), "bar_index": s.bar_index}
+                raise LedgerDivergence("seed_conflict", {"detail": f"settlements: conflicting row for {key}"})
         try:
             self._journal_bar(s, bh)
             self._journal_settlement(s, bh)
@@ -288,9 +354,20 @@ class Ledger:
         interesting enough to raise the ledger's own alarm over).
         Otherwise `bar` must sit exactly one script-timeframe bucket after
         the last bar and must not be forming, or `LedgerGap`.
+
+        N3 fix (review): a forming `bar` is refused UNCONDITIONALLY, ahead
+        of every other check -- including one whose `ts_open` equals the
+        ledger's last settled bar. That used to fall into the `<=`
+        idempotent-redelivery/revision branch first: identical OHLCV
+        returned `self.last` silently, differing OHLCV (a partial bucket
+        still filling in) raised `BarsDivergence` + a `bars_divergence`
+        incident -- wrong on both counts for a bar that was never settled
+        to begin with, just still forming.
         """
         if self.last is None:
             raise RuntimeError("seed() before settle()")
+        if bar.is_forming:
+            raise LedgerGap(bar.ts_open, bar.ts_open, forming=True)
         prev = self.last
         last_bar = self.bars[-1]
         if bar.ts_open <= last_bar.ts_open:
@@ -309,14 +386,17 @@ class Ledger:
             raise ValueError(f"bar {bar.ts_open} is not after the ledger's last bar")
 
         expected = last_bar.ts_open + tf_ms(self.spec.script_tf)
-        if bar.is_forming or bar.ts_open != expected:
-            raise LedgerGap(expected, bar.ts_open, forming=bar.is_forming)
+        if bar.ts_open != expected:
+            # bar.is_forming is already ruled out above (N3): this is
+            # always the non-forming, non-contiguous case now.
+            raise LedgerGap(expected, bar.ts_open, forming=False)
 
         prev_bars_hash = self.bars_hash   # captured before rolling (finding 3)
         bars = self.bars + [bar]
         bh = roll_hash(self.bars_hash, bar)
         r, ms = self._run(bars)
-        s = self._result(bars, r, ms, prev)
+        book = self._settled_book(r)
+        s = self._result(bars, r, ms, prev, book)
 
         # G1 (spec §4 settle 3): the trade prefix ending at the previous
         # bar, and that previous bar's hash/bars_hash/trades digest, must

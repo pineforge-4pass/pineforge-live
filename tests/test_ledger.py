@@ -1,13 +1,24 @@
 import math, pytest
 from pineforge_live.core.ledger import Ledger, LedgerDivergence, BarsDivergence, LedgerGap, RecomputeAborted
 from pineforge_live import types as T
-from tests.helpers import load_bars, make_handle, corpus_spec, open_journal
+from tests.helpers import load_bars, make_handle, corpus_spec, corpus_spec_bracket, open_journal
 
 @pytest.fixture
 def env(test_so, test_feed, tmp_path):
     spec = corpus_spec(); h = make_handle(test_so, spec); j, m = open_journal(tmp_path)
     j.append_epoch(spec.epoch_hash(), "{}")
     return spec, h, j, load_bars(test_feed, 2200)
+
+@pytest.fixture
+def env_bracket(test_so_bracket, test_feed, tmp_path):
+    """The corpus bracket probe (`ta-pivot-atr-stop-target-01`): unlike the
+    always-in-market SMA probe (`env`), it goes flat between trades, so its
+    2000-2600 window exercises flat->open ENTRY fills and close-to-flat
+    bars with NO reversals -- the complement of `env`'s reversal-heavy
+    window, per N1's re-review pin."""
+    spec = corpus_spec_bracket(); h = make_handle(test_so_bracket, spec); j, m = open_journal(tmp_path)
+    j.append_epoch(spec.epoch_hash(), "{}")
+    return spec, h, j, load_bars(test_feed, 2600)
 
 def test_seed_then_settle_g1_holds(env):
     spec, h, j, bars = env
@@ -191,9 +202,16 @@ def test_hash_len_mismatch_detected_on_settle(env, monkeypatch):
     assert e.value.cause == "hash_len"
 
 def test_entry_fills_explain_position_delta(env):
+    """N1 pin: on the always-in-market SMA probe, EVERY bar past the first
+    entry is a reversal (prev and now opposite non-zero signs) -- bar 2001
+    is one (prev -1 -> now +1, avg ~=168.4). The old magnitude-based rule
+    mislabelled every one of these as an EXIT of the OLD side at the
+    close; the fixed direction-based rule must label all of them ENTRY of
+    the NEW side at position_avg_price, with 0 mislabels across the window."""
     spec, h, j, bars = env
     L = Ledger(h, spec, j, "rc"); L.seed(bars[:2000])
     saw_fill = False
+    saw_reversal = False
     for i in range(2000, 2061):
         prev_pos = L.last.position_size
         s = L.settle(bars[i], now_ms=bars[i].ts_open + 900_000)
@@ -203,13 +221,145 @@ def test_entry_fills_explain_position_delta(env):
         assert s.prev_position_size == pytest.approx(prev_pos)
         assert explained + (s.position_delta - explained) == pytest.approx(s.position_delta)
         unexplained = s.position_delta - explained
+        now = s.position_size
         if abs(unexplained) > 1e-12:
             assert len(s.entry_fills) == 1
             fill = s.entry_fills[0]
             assert fill["qty"] == pytest.approx(abs(unexplained))
             assert fill["bar_index"] == s.bar_index and fill["intent"] is None
-            assert fill["leg"] in ("ENTRY", "EXIT")
+            if now == 0.0:
+                pytest.fail(f"bar {i}: unexplained fill but position is fully flat")
+            elif prev_pos * now < 0:
+                # Reversal: ENTRY of the NEW side at position_avg_price.
+                assert fill["leg"] == "ENTRY"
+                assert fill["is_long"] == (now > 0)
+                assert fill["price"] == pytest.approx(s.position_avg_price)
+                saw_reversal = True
+                if i == 2001:
+                    # The re-review's concrete pin: prev -1 -> +1, avg ~168.4.
+                    assert fill["is_long"] is True
+                    assert fill["price"] == pytest.approx(168.4, abs=0.05)
+                    assert fill["qty"] == pytest.approx(1.0)
+            elif prev_pos == 0.0:
+                # Flat -> open: ENTRY of the new side, full size, at avg price.
+                assert fill["leg"] == "ENTRY"
+                assert fill["is_long"] == (now > 0)
+                assert fill["qty"] == pytest.approx(abs(now))
+                assert fill["price"] == pytest.approx(s.position_avg_price)
+            else:
+                # In-place reduce (same side, still open) or pyramid add:
+                # the general direction rule -- checked against the SAME
+                # semantics N1 specifies, not the implementation's exact
+                # expression, so this still catches a regression to the
+                # magnitude-based rule.
+                moves_toward_final = (unexplained > 0) == (now > 0)
+                if moves_toward_final:
+                    assert fill["leg"] == "ENTRY"
+                    assert fill["is_long"] == (now > 0)
+                    assert fill["price"] == pytest.approx(s.position_avg_price)
+                else:
+                    assert fill["leg"] == "EXIT"
+                    assert fill["is_long"] == (prev_pos > 0)
+                    assert fill["price"] == pytest.approx(s.bar.c)
             saw_fill = True
         else:
             assert s.entry_fills == []
     assert saw_fill, "expected at least one entry_fills-producing bar in [2000, 2060]"
+    assert saw_reversal, "expected at least one reversal bar (the SMA probe's defining case) in [2000, 2060]"
+
+def test_entry_fills_bracket_opens_and_closes(env_bracket):
+    """N1 pin (complement of the SMA test): the bracket probe goes flat
+    between trades, so its 2000-2600 window is all flat<->open ENTRY/close
+    pairs and zero reversals -- 21 opens, 21 closes, 0 mislabels."""
+    spec, h, j, bars = env_bracket
+    L = Ledger(h, spec, j, "rc"); L.seed(bars[:2000])
+    opens = closes = reversals = 0
+    for i in range(2000, 2600):
+        prev_pos = L.last.position_size
+        s = L.settle(bars[i], now_ms=bars[i].ts_open + 900_000)
+        sign = lambda k: k.qty if k.is_long else -k.qty
+        explained = sum(sign(k) for k in s.keys if k.entry_bar == s.bar_index) - sum(sign(k) for k in s.keys if k.exit_bar == s.bar_index)
+        unexplained = s.position_delta - explained
+        now = s.position_size
+        if prev_pos * now < 0:
+            reversals += 1
+        if abs(unexplained) > 1e-12:
+            assert len(s.entry_fills) == 1
+            fill = s.entry_fills[0]
+            assert prev_pos == 0.0, f"bar {i}: expected a flat->open bar, prev={prev_pos} now={now}"
+            assert fill["leg"] == "ENTRY"
+            assert fill["is_long"] == (now > 0)
+            assert fill["qty"] == pytest.approx(abs(now))
+            assert fill["price"] == pytest.approx(s.position_avg_price)
+            opens += 1
+        else:
+            assert s.entry_fills == []
+            if prev_pos != 0.0 and now == 0.0:
+                assert any(k.exit_bar == s.bar_index for k in s.new_closed)
+                closes += 1
+    assert reversals == 0
+    assert opens == 21 and closes == 21
+
+def test_seed_shifted_history_conflict_leaves_no_bars_row(env):
+    """N2 pin: a shifted-history seed that conflicts must leave no `bars`
+    row behind -- the poison row that used to break the CORRECT restart's
+    settle() (misdiagnosed as a revised bar) because the old code wrote
+    the bar row before checking whether the settlement row would conflict."""
+    spec, h, j, bars = env
+    Ledger(h, spec, j, "rc").seed(bars[:2000])
+    with pytest.raises(LedgerDivergence) as e:
+        Ledger(h, spec, j, "rc").seed(bars[1:2001])
+    assert e.value.cause == "seed_conflict"
+    assert not j.rows("bars", "epoch_hash=? AND ts_open=?", (spec.epoch_hash(), bars[2000].ts_open))
+    # The correct history then re-seeds cleanly (idempotent) and settle()
+    # continues onto bars[2000] with no incident.
+    L2 = Ledger(h, spec, j, "rc")
+    L2.seed(bars[:2000])
+    s = L2.settle(bars[2000], 0)
+    assert s.bar_index == 2000
+    assert not j.rows("incidents", "kind=?", ("bars_divergence",))
+
+def test_forming_bar_with_last_ts_open_raises_ledger_gap_not_divergence(env):
+    """N3 pin: a forming bar sharing the ledger's LAST settled ts_open must
+    raise LedgerGap (it was never settled -- it's still forming), not fall
+    into the revised-bar branch and raise BarsDivergence + an incident."""
+    spec, h, j, bars = env
+    L = Ledger(h, spec, j, "rc"); L.seed(bars[:2000])
+    forming = T.NormalizedBar(bars[1999].ts_open, bars[1999].o, bars[1999].h, bars[1999].l, bars[1999].c + 1,
+                              bars[1999].v, bars[1999].trade_count, is_forming=True)
+    with pytest.raises(LedgerGap) as e:
+        L.settle(forming, 0)
+    assert e.value.forming is True
+    assert e.value.expected == e.value.got == bars[1999].ts_open
+    assert not j.rows("incidents", "kind=?", ("bars_divergence",))
+    assert L.n == 2000 and L.last.bar_index == 1999
+
+def test_mtm_sign_and_new_closed_pin(env):
+    """Finding 10 pin: equity_mtm's sign convention, and new_closed's count
+    on the bar-2001 reversal (its old side's exit closes exactly 1 trade)."""
+    spec, h, j, bars = env
+    L = Ledger(h, spec, j, "rc"); L.seed(bars[:2000])
+    expected_diff = {2000: -2.34, 2001: -0.16, 2002: -0.04}
+    for i in (2000, 2001, 2002):
+        s = L.settle(bars[i], now_ms=bars[i].ts_open + 900_000)
+        avg = s.position_avg_price if s.position_avg_price is not None else 0.0
+        diff = s.equity_mtm - s.equity
+        assert diff == pytest.approx(s.position_size * (s.bar.c - avg))
+        assert diff == pytest.approx(expected_diff[i], abs=0.02)
+        if i == 2001:
+            assert len(s.new_closed) == 1
+
+def test_settle_result_book_captured_and_survives_later_run(env):
+    """BOOK CAPTURE pin: `SettleResult.book`'s keys match a `settled_book()`
+    computed immediately after the same `settle()` call (same handle, same
+    run), and the captured book is unaffected by a LATER `run_full` on
+    that handle -- it holds already-resolved values, not a live view."""
+    from pineforge_live.core.book import settled_book
+    spec, h, j, bars = env
+    L = Ledger(h, spec, j, "rc"); L.seed(bars[:2000])
+    s = L.settle(bars[2000], 0)
+    fresh = settled_book(h, s)  # `SettleResult.pending_orders` is all settled_book reads
+    assert set(s.book.keys()) == set(fresh.keys())
+    before = dict(s.book)
+    h.run_full([b.ohlcv() for b in bars[:2000]], spec.script_tf)  # a later run on the SAME handle
+    assert s.book == before
