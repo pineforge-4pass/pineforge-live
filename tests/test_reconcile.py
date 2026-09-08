@@ -183,11 +183,17 @@ def test_malformed_missed_and_qty_divergent_counted_not_crashed():
     assert d.corrections == [] and d.counters.get("malformed") == 2
 
 def test_escalate_keeps_first_cause_on_equal_level_and_disposition():
-    """N10 (Q11e): two escalations to the SAME (level, disposition) in one
-    decision keep the FIRST cause, not whichever ran last."""
-    d = R.reconcile(inp([cf(C.FillClass.RETRACTED), cf(C.FillClass.TRIGGER_REVERSED)], real_position=0.0, ledger_position=0.0))
-    assert d.stop[0] == T.StopLevel.FLAT_ONLY
-    assert d.stop[2] == "RETRACTED: real ≠ ledger beyond dead-band"
+    """N10 (Q11e): two escalations to the SAME (level, disposition) keep
+    the FIRST cause, not whichever ran last. Driven through `_escalate`
+    directly with an EQUAL `(HARD, FLATTEN)` pair -- that is the case the
+    N10 fix actually changed (the pre-fix `_escalate` overwrote whenever
+    `disp == FLATTEN`, so a HARD/FLATTEN pair kept the LAST cause). The
+    two-FLAT_ONLY/NONE route this pin used to take could not fail against
+    the pre-fix code (re-review NEW-4)."""
+    d = R.ReconcileDecision()
+    R._escalate(d, T.StopLevel.HARD, T.StopDisposition.FLATTEN, "venue-initiated fill")
+    R._escalate(d, T.StopLevel.HARD, T.StopDisposition.FLATTEN, "dead-man fired")
+    assert d.stop == (T.StopLevel.HARD, T.StopDisposition.FLATTEN, "venue-initiated fill")
 
 def test_escalation_uses_the_shared_riskguard_rank_table():
     """Prelim (Task 8): `_escalate` no longer carries its own copy of
@@ -207,3 +213,134 @@ def test_escalation_keeps_the_strongest_regardless_of_fill_order():
     assert d.stop == hard
     d = R.reconcile(inp([cf(C.FillClass.RETRACTED), cf(C.FillClass.UNATTRIBUTED_VENUE)], real_position=2.0))
     assert d.stop == hard
+
+
+# ---- Task 6 re-review pins (NEW-1 netting, NEW-2 side, NEW-3 opposite
+# sides, NEW-5 skipped_cycle, X13 unreconcilable sides) ----
+
+def test_flatten_suppresses_a_missed_correction_in_the_same_decision():
+    """NEW-1 (X3): a FLATTEN already takes the venue to ZERO, so nothing
+    else in the same decision may be sized against the pre-flatten gap. The
+    pre-fix code shipped `FLATTEN SELL 1.0` **plus** a reduce-only
+    `MARKET_CORRECT SELL 1.0` for the missed EXIT -- both legs reduce-only
+    (so the M3 gate never touched them) and the account cross-check passes
+    (real == basis) -- driving the account to −1.0: a SHORT opened out of a
+    flatten."""
+    d = R.reconcile(inp([cf(C.FillClass.TRIGGER_REVERSED, intent="T"), cf(C.FillClass.MISSED, leg="EXIT", is_long=True, intent="XL")],
+                        ledger_position=0.0, real_position=1.0, our_signed_fills=1.0))
+    assert len(d.corrections) == 1
+    c = d.corrections[0]
+    assert c.kind == "FLATTEN" and c.side == T.Side.SELL and abs(c.qty - 1.0) < 1e-9
+
+def test_flatten_suppresses_a_qty_divergent_correction_in_the_same_decision():
+    """NEW-1 (X4): same shape on the QTY_DIVERGENT leg -- the pre-fix code
+    shipped `FLATTEN SELL 1.5` **plus** `REDUCE_ONLY_TRIM SELL 0.5`,
+    leaving the venue at −0.5."""
+    d = R.reconcile(inp([cf(C.FillClass.TRIGGER_REVERSED, intent="T"), cf(C.FillClass.QTY_DIVERGENT, qty=0.5, intent="L")],
+                        ledger_position=1.0, real_position=1.5, our_signed_fills=1.5))
+    assert len(d.corrections) == 1
+    c = d.corrections[0]
+    assert c.kind == "FLATTEN" and c.side == T.Side.SELL and abs(c.qty - 1.5) < 1e-9
+
+def test_missed_and_qty_divergent_net_within_one_decision():
+    """NEW-1 (X1): the ordinary pyramid shape -- one candidate partially
+    filled, the other not, so classify's M4 split yields a MISSED **and** a
+    QTY_DIVERGENT describing ONE 1.5 shortfall. "Once per decision" means
+    NETTED: the MISSED correction issues 1.0 and the QTY_DIVERGENT pass
+    then sees `basis + issued` and tops up only the 0.5 remainder. The
+    pre-fix code sized both from the full gap (BUY 1.0 + TOP_UP 1.5 = 2.5
+    on a 1.5 shortfall)."""
+    d = R.reconcile(inp([cf(C.FillClass.MISSED, qty=1.0, intent="L1"), cf(C.FillClass.QTY_DIVERGENT, qty=0.5, intent="L2")],
+                        ledger_position=2.0, real_position=0.5, our_signed_fills=0.5))
+    assert len(d.corrections) == 2
+    mc, top = d.corrections
+    assert mc.kind == "MARKET_CORRECT" and mc.side == T.Side.BUY and abs(mc.qty - 1.0) < 1e-9 and mc.intent == "L1"
+    assert top.kind == "TOP_UP" and top.side == T.Side.BUY and abs(top.qty - 0.5) < 1e-9 and top.intent == "L2"
+
+def test_missed_exit_and_qty_divergent_net_within_one_decision():
+    """NEW-1 (X2): the reducing mirror image -- ledger 0.5, basis 1.5, a
+    missed EXIT of 0.5 and a QTY_DIVERGENT over the same 1.0 excess. The
+    missed EXIT sells 0.5, the trim then covers only the remaining 0.5
+    (pre-fix: SELL 0.5 + TRIM 1.0 = 1.5, flattening a ledger that still
+    wants 0.5 long)."""
+    d = R.reconcile(inp([cf(C.FillClass.MISSED, qty=0.5, leg="EXIT", is_long=True, intent="XL"), cf(C.FillClass.QTY_DIVERGENT, qty=1.0, intent="L")],
+                        ledger_position=0.5, real_position=1.5, our_signed_fills=1.5))
+    assert len(d.corrections) == 2
+    mc, trim = d.corrections
+    assert mc.kind == "MARKET_CORRECT" and mc.side == T.Side.SELL and abs(mc.qty - 0.5) < 1e-9 and mc.intent == "XL"
+    assert trim.kind == "REDUCE_ONLY_TRIM" and trim.side == T.Side.SELL and abs(trim.qty - 0.5) < 1e-9
+
+def _x6_fills():
+    """The X6 one-bar round trip `0 → +1 (L) → 0 (XL) → −1 (S)` with the
+    venue idle: `emulated_from_settle` yields the L/XL legs from the closed
+    trade and the S delta fill, all three MISSED."""
+    return [cf(C.FillClass.MISSED, qty=1.0, leg="ENTRY", is_long=True, intent="L"),
+            cf(C.FillClass.MISSED, qty=1.0, leg="EXIT", is_long=True, intent="XL"),
+            cf(C.FillClass.MISSED, qty=1.0, leg="ENTRY", is_long=False, intent="S")]
+
+def test_missed_entry_representative_agrees_with_the_ledger_side():
+    """NEW-2 (X6): on the `basis == 0` ENTRY path the representative must
+    be the first missed entry whose own direction equals the LEDGER's side
+    -- the pre-fix code took `missed_entries[0]` unconditionally, so this
+    one-bar round trip corrected `BUY 1.0` against a ledger of −1.0."""
+    d = R.reconcile(inp(_x6_fills(), ledger_position=-1.0, real_position=0.0))
+    assert len(d.corrections) == 1
+    c = d.corrections[0]
+    assert c.kind == "MARKET_CORRECT" and c.side == T.Side.SELL and abs(c.qty - 1.0) < 1e-9 and c.intent == "S"
+
+def test_missed_entry_representative_is_list_order_independent():
+    """NEW-2 (X6b): the same fills in the other order must give the same
+    (correct-side) answer -- pre-fix the outcome flipped with list order."""
+    fills = _x6_fills()
+    reordered = [fills[2], fills[0], fills[1]]
+    a = R.reconcile(inp(_x6_fills(), ledger_position=-1.0, real_position=0.0))
+    b = R.reconcile(inp(reordered, ledger_position=-1.0, real_position=0.0))
+    assert [(c.kind, c.side, c.qty, c.intent) for c in a.corrections] == [(c.kind, c.side, c.qty, c.intent) for c in b.corrections]
+    assert b.corrections[0].side == T.Side.SELL
+
+def test_opposite_side_qty_divergent_trims_to_zero_then_tops_up():
+    """NEW-3 (X7b): `basis` and `ledger` on opposite sides is TWO orders,
+    not one full-swing order -- an ungated reduce-only trim of `|basis|`
+    back to flat, then a gated/budgeted `TOP_UP |ledger|`. Pre-fix: a
+    single `TOP_UP BUY 1.5` (right net outcome, but the reducing half was
+    mis-labelled exposure-increasing)."""
+    d = R.reconcile(inp([cf(C.FillClass.QTY_DIVERGENT, qty=1.0, intent="L")],
+                        ledger_position=1.0, real_position=-0.5, our_signed_fills=-0.5))
+    assert len(d.corrections) == 2
+    trim, top = d.corrections
+    assert trim.kind == "REDUCE_ONLY_TRIM" and trim.side == T.Side.BUY and abs(trim.qty - 0.5) < 1e-9
+    assert top.kind == "TOP_UP" and top.side == T.Side.BUY and abs(top.qty - 1.0) < 1e-9
+
+def test_opposite_side_qty_divergent_under_flat_only_still_trims_to_zero():
+    """NEW-3 (X7): the case the split exists for -- under FLAT_ONLY the
+    reduce-only half is exactly the order FLAT_ONLY is meant to permit, so
+    it must still ship while the top-up is refused and carried. Pre-fix the
+    whole 1.5 was one exposure-increasing order and the venue stayed short
+    under a FLAT_ONLY stop."""
+    d = R.reconcile(inp([cf(C.FillClass.QTY_DIVERGENT, qty=1.0, intent="L")],
+                        ledger_position=1.0, real_position=-0.5, our_signed_fills=-0.5, stop_level=T.StopLevel.FLAT_ONLY))
+    assert len(d.corrections) == 1
+    trim = d.corrections[0]
+    assert trim.kind == "REDUCE_ONLY_TRIM" and trim.side == T.Side.BUY and abs(trim.qty - 0.5) < 1e-9
+    assert abs(d.residual_qty - 1.0) < 1e-9 and d.counters.get("refused_by_own_stop") == 1
+
+def test_account_mismatch_with_a_missed_entry_marks_the_cycle_skipped():
+    """NEW-5 (X10): a MISSED entry dropped by the L8 account cross-check is
+    a cycle the reconciler declined to act on -- `skipped_cycle` must say
+    so (Task 8 writes the `cycle_skipped` row from it); pre-fix only the
+    STOP row recorded it."""
+    d = R.reconcile(inp([cf(C.FillClass.MISSED, qty=1.0)], our_signed_fills=0.0, real_position=5.0, ledger_position=1.0))
+    assert d.stop == (T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "account_mismatch")
+    assert d.corrections == [] and d.skipped_cycle and d.counters.get("skipped_cycle") == 1
+
+def test_unreconcilable_sides_escalates_flat_only_hold():
+    """X13: a MISSED fill that fails BOTH gates because the ledger and our
+    own fills sit on OPPOSITE sides is not an ordinary "nothing to do" --
+    the two sources disagree about which way the position points and no
+    correction is derivable, so escalate `FLAT_ONLY / HOLD` (through the
+    shared `_escalate`, so it stays monotonic and gates this same
+    decision's own corrections). Pre-fix: silently counted, no STOP."""
+    d = R.reconcile(inp([cf(C.FillClass.MISSED, leg="EXIT", is_long=True, intent="XL"), cf(C.FillClass.MISSED, leg="ENTRY", is_long=False, intent="S")],
+                        ledger_position=-1.0, real_position=1.0, our_signed_fills=1.0))
+    assert d.stop == (T.StopLevel.FLAT_ONLY, T.StopDisposition.HOLD, "unreconcilable_sides")
+    assert d.corrections == [] and d.counters.get("skipped_position_mismatch") == 1
