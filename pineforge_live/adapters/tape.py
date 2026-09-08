@@ -19,13 +19,18 @@ def probe_point_offsets_ms(tf: str) -> tuple[int, int, int, int]:
     ms = tf_ms(tf)
     return tuple(int(f * ms) for f in PROBE_POINT_FRACTIONS)
 
-def load_feed_csv(path: str | Path) -> list[T.NormalizedBar]:
+def load_feed_csv(path: str | Path, limit: int | None = None) -> list[T.NormalizedBar]:
     """Read a `timestamp,open,high,low,close,volume` CSV (the derived-feed
     export format) into NormalizedBars; `trade_count` is always 0 (a
-    derived feed carries no per-bar trade count)."""
+    derived feed carries no per-bar trade count). `limit` stops after that
+    many rows -- a caller that only needs a prefix (the L1 harness's
+    `start + bars` window, the suite's fixtures) does not pay for parsing
+    a multi-year feed to the end."""
     out = []
     with Path(path).open() as fh:
         for r in csv.DictReader(fh):
+            if limit is not None and len(out) >= limit:
+                break
             out.append(T.NormalizedBar(int(r["timestamp"]), float(r["open"]), float(r["high"]), float(r["low"]),
                                        float(r["close"]), float(r["volume"]), 0))
     return out
