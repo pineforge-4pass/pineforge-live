@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
@@ -242,16 +243,18 @@ def load_signal_config(path: str | Path) -> SignalConfig:
         source_sha = file_sha256(strategy_source) if strategy_source else 'unrecorded'
     except OSError:
         raise ConfigError('identity: could not read strategy or history file') from None
+    source_identity=_canonical(asdict(source))
+    if source.path is not None:
+        source_identity['path']=Path(os.path.normpath(d['source']['path'])).as_posix()
     receipt = {'library_sha256': library_sha, 'compiler_id': 'unrecorded', 'codegen_sha': 'unrecorded',
-               'source_sha': source_sha, 'source_config_sha256': T.canonical_sha256(_canonical(asdict(source))),
+               'source_sha': source_sha, 'source_config_sha256': T.canonical_sha256(source_identity),
                'strategy_name': d['strategy_name'], 'provenance': 'user-supplied compiled strategy'}
     code = CodeIdentity(library_sha, 'unrecorded', source_sha, receipt)
     epoch = EpochSpec(instrument.venue, instrument, d['script_tf'], history[0].ts_open, horizon,
                       code, syminfo, history_sha, inputs=settings['inputs'], overrides=settings['overrides'])
     # Normalize defaults and paths so implicit defaults do not create spurious identities.
     identity = {'strategy_name': d['strategy_name'], 'epoch_hash': epoch.epoch_hash(), 'mode': mode,
-                'trigger_mode': trigger_mode, 'max_eval_rate': max_eval_rate, 'webhook': asdict(webhook), 'source': asdict(source),
-                'journal_path': str(journal_path)}
+                'trigger_mode': trigger_mode, 'max_eval_rate': max_eval_rate, 'webhook': asdict(webhook), 'source': source_identity}
     return SignalConfig(path, strategy, d['strategy_name'], strategy_source, history_path, journal_path,
                         mode, d['script_tf'], instrument, syminfo, settings['inputs'], settings['overrides'],
                         horizon, trigger_mode, webhook, source, epoch, T.canonical_sha256(_canonical(identity)), history, max_eval_rate)

@@ -341,3 +341,29 @@ asyncio.run(main())
         process.stdin.close()
         process.stdout.close()
         process.stderr.close()
+
+
+@pytest.mark.parametrize('failure',['payload','received','sent'])
+def test_oversized_websocket_is_not_retried(failure,monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from pineforge_live.sources.websocket import WebSocketSource
+    from pineforge_live.sources.base import SourceConfig,SourceError,MAX_FRAME_BYTES
+    if failure=='payload':
+        excmod=pytest.importorskip('websockets.exceptions')
+        error=excmod.PayloadTooBig(MAX_FRAME_BYTES+1,MAX_FRAME_BYTES)
+    else:
+        error=OSError('size failure')
+        setattr(error,'rcvd' if failure=='received' else 'sent',SimpleNamespace(code=1009))
+    class Socket:
+        async def __aenter__(self):return self
+        async def __aexit__(self,*a):pass
+        def __aiter__(self):return self
+        async def __anext__(self):raise error
+    sleeps=[]
+    async def sleep(seconds):sleeps.append(seconds);raise AssertionError('must not retry oversized frame')
+    monkeypatch.setattr(asyncio,'sleep',sleep)
+    source=WebSocketSource(SourceConfig('websocket',url='ws://127.0.0.1:1'),script_tf='1',connect=lambda *a,**k:Socket())
+    with pytest.raises(SourceError,match='one MiB'):
+        asyncio.run(anext(source.events()))
+    assert sleeps==[]

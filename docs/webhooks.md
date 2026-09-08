@@ -103,8 +103,9 @@ pineforge-live check --config ./signal-config.json
 ```
 
 `check` processes one finite snapshot, attempts queued deliveries, and exits.
-`run` consumes the selected source until it ends or you interrupt it. Both
-resume the same journal. Each command prints a JSON report and returns a
+`run` consumes finite JSONL/stdin input until EOF. HTTP polling and WebSocket
+feeds continue until interrupted; WebSocket connections reconnect even after
+a normal server close. Both commands resume the same journal. Each command prints a JSON report and returns a
 nonzero status when work remains unresolved; a report is also saved beside
 the journal with the suffix `.report.json`.
 
@@ -123,8 +124,9 @@ configuration reads one JSON frame per line from standard input:
 `bar` means a confirmed bar; `forming` means the current incomplete bar.
 Opening timestamps must align to the configured timeframe, and each new
 confirmed bar must follow the preceding one. A forming bar must immediately
-follow the latest confirmed bar. Tick sequence numbers must increase;
-duplicate events can be replayed on reconnect. `trade_count` is optional on
+follow the latest confirmed bar. Tick sequence numbers must be contiguous (`last + 1`); exact duplicates may
+be replayed on reconnect. A sequence hole is an unhealed gap and stops the
+runner. `trade_count` is optional on
 bars and defaults to zero.
 
 Other source configurations are:
@@ -319,3 +321,9 @@ stored queue epoch even if the strategy library/history files were moved or
 rebuilt. If a journal holds multiple deployments, select `--epoch HASH`.
 These commands read only the webhook and journal settings from the config;
 they never need to load or execute the strategy to recover delivery.
+
+Runtime output and sidecar paths must not overlap configuration or input
+files. Relative source paths stay relative in deployment identity, so moving
+a configuration tree together with its journal preserves IDs and resumes
+without replaying actions. Keep the stored webhook URL unchanged for queue
+recovery. Volume-only forming updates participate in the evaluation cadence.

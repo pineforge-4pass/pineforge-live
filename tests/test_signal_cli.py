@@ -62,3 +62,24 @@ def test_webhook_recovery_uses_stored_epoch_without_strategy_artifacts(test_so,t
     assert j._exec('SELECT COUNT(*) FROM webhook_targets').fetchone()[0]==1
     j.close()
     assert main(['webhook-flush','--config',str(path)])==0
+
+
+def test_moved_config_tree_resumes_without_duplicate_webhook_actions(test_so,test_feed,tmp_path,receiver,capsys):
+    import shutil
+    from pineforge_live.config import load_signal_config
+    from pineforge_live.journal import Journal
+    port,received=receiver
+    original=tmp_path/'original';original.mkdir()
+    path,_=document(test_so,test_feed,original,port)
+    first=load_signal_config(path)
+    assert main(['check','--config',str(path)])==0
+    capsys.readouterr();assert len(received)==2
+    moved=tmp_path/'moved';shutil.copytree(original,moved)
+    second=load_signal_config(moved/'config.json')
+    assert first.config_hash==second.config_hash and first.epoch.epoch_hash()==second.epoch.epoch_hash()
+    assert main(['check','--config',str(moved/'config.json')])==0
+    report=json.loads(capsys.readouterr().out)
+    assert report['emitted']==report['delivered']==0 and len(received)==2
+    j=Journal.open(second.journal_path)
+    assert j._exec('SELECT COUNT(*) FROM webhook_targets').fetchone()[0]==1
+    j.close()

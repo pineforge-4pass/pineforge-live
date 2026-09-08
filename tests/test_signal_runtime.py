@@ -193,3 +193,26 @@ def test_volume_only_updates_evaluate_after_rate_interval(test_so,test_feed,tmp_
     report=asyncio.run(run_signals(config,source=Ticks(),mode='stream'))
     assert report['error'] is None,report
     assert report['evaluations']==2 and report['coalesced']==0
+
+
+def test_runtime_lost_commit_authority_does_not_fence_successor(test_so,test_feed,tmp_path,receiver,monkeypatch):
+    from pineforge_live.signals.engine import SignalEngine
+    from pineforge_live.journal import Journal,StopMarker
+    port,received=receiver;path,_=document(test_so,test_feed,tmp_path,port)
+    config=load_signal_config(path)
+    original=SignalEngine.settle
+    def lose_before_commit(self,*args,**kwargs):
+        self.authority=lambda:False
+        return original(self,*args,**kwargs)
+    monkeypatch.setattr(SignalEngine,'settle',lose_before_commit)
+    report=asyncio.run(run_signals(config,mode='check'))
+    assert report['error'] and not received
+    marker=StopMarker(str(config.journal_path)+'.stop')
+    assert not marker.exists()
+    j=Journal.open(config.journal_path,stop_marker=marker)
+    assert j.rows('stops','1=1',())==[]
+    assert j.last_settlement(config.epoch.epoch_hash())['bar_index']==1999
+    j.close()
+    monkeypatch.setattr(SignalEngine,'settle',original)
+    successor=asyncio.run(run_signals(config,mode='check'))
+    assert successor['error'] is None and successor['delivered']==2

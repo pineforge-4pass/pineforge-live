@@ -200,3 +200,19 @@ def test_report_symlink_cannot_alias_configuration(tmp_path):
     with pytest.raises(ConfigError,match='overlap'):
         load_signal_config(path)
     assert json.loads(path.read_text())==d
+
+
+@pytest.mark.parametrize('kind',['stdin','jsonl'])
+def test_relocating_relative_config_preserves_epoch_and_config_identity(tmp_path,kind):
+    import shutil
+    original=tmp_path/'original';original.mkdir()
+    d=config_document(original)
+    if kind=='jsonl':
+        (original/'events.jsonl').write_text('')
+        d['source']={'kind':'jsonl','path':'./events.jsonl'}
+    first=load_signal_config(write_config(original,d))
+    moved=tmp_path/'moved';shutil.copytree(original,moved)
+    second=load_signal_config(moved/'config.json')
+    assert first.epoch.epoch_hash()==second.epoch.epoch_hash()
+    assert first.config_hash==second.config_hash
+    assert first.journal_path!=second.journal_path

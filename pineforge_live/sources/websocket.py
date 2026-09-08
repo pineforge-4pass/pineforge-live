@@ -35,6 +35,12 @@ class WebSocketSource:
             except (SourceError, asyncio.CancelledError):
                 raise
             except Exception as exc:
+                oversized=(type(exc).__module__.startswith('websockets.') and
+                           any(cls.__name__=='PayloadTooBig' for cls in type(exc).__mro__))
+                oversized=oversized or any(getattr(getattr(exc,part,None),'code',None)==1009
+                                           for part in ('rcvd','sent'))
+                if oversized:
+                    raise SourceError('feed frame: exceeds one MiB limit') from None
                 # Retry transport failures, never malformed generic feed frames.
                 # Exception details can include sensitive endpoint query strings.
                 if not isinstance(exc, (OSError, TimeoutError)) and not type(exc).__module__.startswith('websockets.'):
