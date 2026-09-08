@@ -141,7 +141,9 @@ class AdapterError(Exception):
     def __reduce__(self):
         # BaseException.__reduce__ restores state via setattr, which a frozen
         # dataclass forbids (FrozenInstanceError). Reconstruct via __init__ instead
-        # so pickle/copy.deepcopy round-trip cleanly.
+        # so pickle/copy.deepcopy round-trip cleanly. Note (finding 16): this
+        # drops __notes__/__cause__/__traceback__ -- add_note()'d notes do not
+        # survive a pickle/deepcopy round-trip.
         return (type(self), (self.retryable, self.retry_after_ms, self.reason_class, self.message))
     def add_note(self, note: str) -> None:
         # BaseException.add_note() assigns self.__notes__ via normal attribute
