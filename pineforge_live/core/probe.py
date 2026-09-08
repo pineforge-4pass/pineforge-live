@@ -2,7 +2,6 @@
 from __future__ import annotations
 import dataclasses
 import json
-import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -110,7 +109,21 @@ def _resolve_intent(book: dict[str, Intent], is_long: bool) -> str:
     `is_long` side, chosen deterministically as the lowest mirror `index`
     among candidates; `"?"` if none rest on that side. Used by
     `_delta_fill` to attribute a position-delta fill to the resting order
-    that must have caused it (spec §4 review finding 1)."""
+    that must have caused it (spec §4 review finding 1).
+
+    N5 (design, v1-documented, re-review): this attributes ONE delta to
+    the lowest-index candidate, full stop -- it does not attempt to split
+    a delta across multiple same-side resting entries that could each
+    plausibly have contributed. Under `pyramiding >= 2`, two same-side
+    entries filling on the SAME bar would both be folded into the ledger's
+    single unexplained residual and so read as one `_delta_fill` of the
+    combined qty, attributed to whichever of the two has the lower mirror
+    index -- the other's own id is never surfaced. This mirrors
+    `ledger.py`'s `SettleResult.entry_fills`, which makes the identical
+    simplification (`Ledger._result`'s `unexplained` residual is also a
+    single synthesized fill, never two) -- fine for the corpus fixtures
+    (neither exercises same-bar multi-lot pyramiding), flagged here should
+    a later probe fixture exercise it."""
     candidates = [it for it in book.values() if it.kind in _ENTRYISH_KINDS and it.is_long == is_long]
     return min(candidates, key=lambda it: it.index).key.order_id if candidates else "?"
 
@@ -138,9 +151,20 @@ def _delta_fill(r: RunResult, prev_position_size: float, forming: T.NormalizedBa
     via `_resolve_intent`, restricted to kind ENTRY/MARKET/RAW_ORDER (never
     EXIT: a closing/reducing intent is exposed to the venue mirror under
     one of those three kinds too -- see `book.py`'s `_counts_as_entry`
-    docstring for the RAW_ORDER case -- and `"?"` is expected, not a bug,
-    for a margin-call/max-intraday-loss close, which the engine synthesises
-    with no order id at all)."""
+    docstring for the RAW_ORDER case), but ONLY for an ENTRY-leg fill. An
+    EXIT-leg fill (an unexplained delta that reduces, without closing, an
+    open position) always reads `intent="?"` (N2, task-4 re-review):
+    `_resolve_intent(book, is_long)` on the reducing side would return the
+    SAME-SIDE resting entry's id -- e.g. the `Long` entry -- for a fill
+    that REDUCED the long, never the order that actually did the
+    reducing; no candidate in `_ENTRYISH_KINDS` (ENTRY/MARKET/RAW_ORDER)
+    ever IS the reducing order, so returning one of them would mislabel
+    the fill instead of honestly admitting the id is unknown -- matching
+    the ledger's own `entry_fills`, which leaves `intent=None` for the
+    identical case. Practically unreachable on the corpus fixtures today
+    (the engine books every reduction as a closed trade, so this branch
+    never fires), but kept honest for whichever engine/script combination
+    first exercises it."""
     delta = r.position_size - prev_position_size
     sign = lambda t: t.qty if t.is_long else -t.qty
     closed = [t for t in r.trades if not t.open_at_end]
@@ -152,8 +176,28 @@ def _delta_fill(r: RunResult, prev_position_size: float, forming: T.NormalizedBa
     leg = "ENTRY" if pos != 0.0 and (unexplained > 0) == (pos > 0) else "EXIT"
     is_long = (unexplained > 0) if leg == "ENTRY" else (prev_position_size > 0)
     price = r.position_avg_price if leg == "ENTRY" else forming.c
-    intent = _resolve_intent(book, is_long)
+    intent = _resolve_intent(book, is_long) if leg == "ENTRY" else "?"
     return ProbeFill(intent, leg, is_long, abs(unexplained), price, n, -1)
+
+
+def _keyed_by_sig_ordinal(fills: list[ProbeFill]) -> dict[tuple, ProbeFill]:
+    """Keys `fills` by `(sig, ordinal)`, `ordinal` the 0-based occurrence
+    count of that `sig` within `fills`, in list order (N3, task-4
+    re-review). Plain `sig` alone collapses two fills that share
+    `(intent, leg, is_long)` -- e.g. two pyramided legs closed by ONE
+    shared exit id on the same bar -- onto a single dict slot, silently
+    dropping one fill's identity and (in the auto/other matching this
+    feeds) pairing the survivor against an arbitrary counterpart instead
+    of its actual match. Ordinal position isn't a guaranteed 1:1
+    correspondence across two intrabar paths or two ticks, but both sides
+    preserve the engine's own trade-report order, so pairing by position
+    is deterministic and strictly better than "last write wins"."""
+    counts: dict[tuple, int] = defaultdict(int)
+    out: dict[tuple, ProbeFill] = {}
+    for f in fills:
+        key = (f.sig, counts[f.sig]); counts[f.sig] += 1
+        out[key] = f
+    return out
 
 
 def _drop_unresting_entries(fills: list[ProbeFill], resting_ids: set[str]) -> tuple[list[ProbeFill], list[ProbeFill]]:
@@ -189,7 +233,7 @@ class Probe:
 
     def __init__(self, handle, spec, ledger, trail_refresh_policy: str = "bar_open_level"):
         self.h, self.spec, self.L, self.policy = handle, spec, ledger, trail_refresh_policy
-        self.prev_fills: dict[int, dict[tuple, ProbeFill]] = defaultdict(dict)   # bar_index -> {sig: last-confirmed ProbeFill}
+        self.prev_fills: dict[int, dict[tuple, ProbeFill]] = defaultdict(dict)   # bar_index -> {(sig, ordinal): last-confirmed ProbeFill}
         self.retracted_history: dict[int, list[ProbeFill]] = defaultdict(list)
 
     def _run(self, bars, path_order: int) -> RunResult:
@@ -281,13 +325,21 @@ class Probe:
                 # half-run, and never touch prev_fills/retracted_history.
                 ms = int((time.perf_counter() - t0) * 1000)
                 self._journal(journal, forming, now_ms, "aborted", ms)
-                return ProbeResult(n, forming, [], [], [], {}, guard, ms, True, [])
+                # N4 (re-review): still report P_auto's own drops on an
+                # abort -- they were already computed above and the caller
+                # otherwise loses that signal, even though no fill/deferral
+                # is confirmed on a half-run.
+                return ProbeResult(n, forming, [], [], [], {}, guard, ms, True, dropped)
             d_other = _delta_fill(p_other, self.L.last.position_size, forming, book, n)
             other_all = last_bar_fills(p_other, n) + ([d_other] if d_other is not None else [])
             other_kept, _ = _drop_unresting_entries(other_all, resting_ids)
-            other_by_sig = {f.sig: f for f in other_kept}
+            # N3 (re-review): key both sides by (sig, ordinal), not sig
+            # alone -- see _keyed_by_sig_ordinal's docstring.
+            other_by_sig = _keyed_by_sig_ordinal(other_kept)
+            auto_ordinals: dict[tuple, int] = defaultdict(int)
             for f in auto_fills:
-                match = other_by_sig.get(f.sig)
+                auto_key = (f.sig, auto_ordinals[f.sig]); auto_ordinals[f.sig] += 1
+                match = other_by_sig.get(auto_key)
                 if match is not None:
                     # m4: intersect on (intent, leg, is_long); qty is data --
                     # a disagreement is flagged, not treated as a mismatch.
@@ -303,7 +355,10 @@ class Probe:
         # N7 (cont'd): prev_fills now stores the full ProbeFill per sig (not
         # a bare sig set) so a retraction can carry the original fill's
         # price/bars forward instead of a synthesized NaN-priced stand-in.
-        cur_map = {f.sig: f for f in fills}
+        # N3 (cont'd): keyed by (sig, ordinal), same reasoning as the
+        # auto/other match above -- two same-sig fills on this bar must not
+        # collapse onto one slot here either.
+        cur_map = _keyed_by_sig_ordinal(fills)
         prev_map = self.prev_fills[n]
         retracted = [prev_map[s] for s in (prev_map.keys() - cur_map.keys())]
         self.prev_fills[n] = cur_map

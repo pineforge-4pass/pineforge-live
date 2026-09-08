@@ -121,7 +121,7 @@ def test_abort_then_retry_same_bar_succeeds(env, monkeypatch):
     s = L.settle(bars[2000], 0)  # retry the SAME bar -> succeeds
     assert s.bar_index == 2000 and L.n == 2001 and L.last is s
 
-def test_g1_hash_mismatch_detected(env, monkeypatch):
+def test_g1_hash_mismatch_detected(env):
     spec, h, j, bars = env
     L = Ledger(h, spec, j, "rc"); L.seed(bars[:2000])
     # tamper the journaled hash of bar 1999 (simulates a mutant .so / divergent recompute)
@@ -349,17 +349,46 @@ def test_mtm_sign_and_new_closed_pin(env):
         if i == 2001:
             assert len(s.new_closed) == 1
 
-def test_settle_result_book_captured_and_survives_later_run(env):
-    """BOOK CAPTURE pin: `SettleResult.book`'s keys match a `settled_book()`
-    computed immediately after the same `settle()` call (same handle, same
-    run), and the captured book is unaffected by a LATER `run_full` on
-    that handle -- it holds already-resolved values, not a live view."""
+def test_settle_result_book_captured_and_survives_later_run(env_bracket):
+    """N5 pin (task-2 re-review 2): the original version of this test
+    could not actually detect a stale book -- it compared `set(keys) ==
+    set(keys)` (always true regardless of WHEN the levels were read) and
+    `s.book == before` where `before = dict(s.book)` (the SAME captured
+    object, so trivially equal to itself). On the SMA fixture's sole
+    always-`(None, None, None)` MARKET row, even a genuinely stale read
+    would pass both. Fixed here on the bracket fixture (real numeric
+    stop/limit levels, per N1's re-review pin) with two discriminating
+    checks: (1) FULL VALUE equality -- not just keys -- between
+    `s.book` and a `settled_book()` taken immediately after the same run
+    (the accessor-window contract's own claim); (2) after a FOREIGN
+    `run_full()` on the same handle, a FRESH `settled_book()` read must no
+    longer agree with what `s.book` captured -- either because it now
+    describes the foreign run's mirror instead (a value disagreement), or
+    because the foreign run resized the mirror out from under the old
+    index entirely, in which case `settled_book`'s restored strict
+    contract (Task 6 prelim) raises `RuntimeError` rather than fabricating
+    a plausible-but-wrong Intent. `s.book` itself -- already-resolved,
+    frozen dataclasses, not a live view -- must be unaffected either way."""
     from pineforge_live.core.book import settled_book
-    spec, h, j, bars = env
+    spec, h, j, bars = env_bracket
     L = Ledger(h, spec, j, "rc"); L.seed(bars[:2000])
-    s = L.settle(bars[2000], 0)
-    fresh = settled_book(h, s)  # `SettleResult.pending_orders` is all settled_book reads
-    assert set(s.book.keys()) == set(fresh.keys())
+    L.settle(bars[2000], 0)
+    s = None
+    for i in range(2001, 2007):
+        s = L.settle(bars[i], now_ms=bars[i].ts_open + 900_000)
+    assert s.bar_index == 2006
+    assert s.book, "expected >=1 resting bracket intent by bar 2006 (position opened at bar 2005)"
+
+    fresh = settled_book(h, s)  # taken immediately after the same run -- the valid accessor window
+    assert s.book == fresh  # full VALUE equality, not just matching keys
+
     before = dict(s.book)
-    h.run_full([b.ohlcv() for b in bars[:2000]], spec.script_tf)  # a later run on the SAME handle
-    assert s.book == before
+    h.run_full([b.ohlcv() for b in bars[:2000]], spec.script_tf)  # a FOREIGN run on the SAME handle
+    assert s.book == before  # the captured SettleResult itself is untouched
+
+    try:
+        drifted = settled_book(h, s)
+    except RuntimeError:
+        pass  # the foreign run resized the mirror -- a fresh read can no longer even resolve it
+    else:
+        assert drifted != before, "a fresh settled_book() after a foreign run must not still agree with the captured book"

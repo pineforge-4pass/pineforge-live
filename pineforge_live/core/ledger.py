@@ -98,6 +98,23 @@ class SettleResult:
     (a still-open entry, or an exit that reduced but didn't close a
     position) -- see `Ledger._result`. Always empty on `seed()`.
 
+    N7 (re-review): an ENTRY leg's `price` is `position_avg_price` -- the
+    post-fill BLENDED average across every lot resting on that side, not
+    the individual fill's own price. On a flat->open entry these are the
+    same number; on a PYRAMIDING add (a same-side lot stacked on an
+    already-open position) they are not -- e.g. a third same-side add
+    reports `price == position_avg_price` computed AFTER the add, which
+    differs from the add's own bar-open fill price by however much the
+    blend shifted. A caller matching an emulated fill to a venue fill by
+    price (Task 5/8) must reconstruct the add's own price from the
+    avg-price delta, not compare directly against `entry_fills`' price.
+    The EXIT leg (priced at the bar's close) is, by contrast, defensive
+    rather than load-bearing on the corpus fixtures: every reduce those
+    fixtures' engine reports list shows up as its own closed trade (and
+    is therefore already `explained`, never reaching this branch) -- it
+    exists for a reduce the report doesn't itemize, should the engine
+    ever produce one, and is not exercised by any corpus probe today.
+
     `book` is this settlement's resting-intent book (spec §4 settle 5):
     `core.book.settled_book(handle, this_run's_RunResult)`, captured by
     `Ledger._settled_book` IMMEDIATELY after the `run_full()` that produced
@@ -225,11 +242,16 @@ class Ledger:
                 # magnitude -- `pos` is the bar's NEW (post-run) position
                 # size. An unexplained delta that moves TOWARD the final
                 # position is an entry in that (the final) direction;
-                # anything else -- including a reversal's old-side exit,
-                # which used to be misjudged an ENTRY of the new side by
-                # comparing |position_size| -- reduces the previous
-                # position and is an EXIT of the OLD side, priced at the
-                # bar's close (no avg price survives a fully-closed side).
+                # anything else reduces the previous position and is an
+                # EXIT of the OLD side, priced at the bar's close (no avg
+                # price survives a fully-closed side). This matters most
+                # on a reversal: the OLD side's exit is already explained
+                # by the bar-n closed trade and never reaches this branch
+                # at all -- what the old magnitude-based rule actually
+                # misjudged (N6, re-review) was the NEW side's opening
+                # entry, comparing |position_size| and reading it as an
+                # EXIT of the old side (same magnitude, wrong direction)
+                # instead of an ENTRY of the new one.
                 pos = r.position_size
                 leg = "ENTRY" if pos != 0.0 and (unexplained > 0) == (pos > 0) else "EXIT"
                 entry_fills.append({

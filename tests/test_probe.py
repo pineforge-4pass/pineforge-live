@@ -1,11 +1,13 @@
 import asyncio
 import dataclasses
+from types import SimpleNamespace
 import pytest
 from pineforge_live import types as T
 from pineforge_live.core.book import settled_book
 from pineforge_live.core.ledger import Ledger
 from pineforge_live.core.probe import Probe, path_order_other
 from pineforge_live.engine.handle import PATH_ORDER_HIGH_FIRST, PATH_ORDER_LOW_FIRST
+from pineforge_live.engine.report import RunResult, TradeRow
 from pineforge_live.adapters.tape import TapeTickSource
 from pineforge_live.bars import FormingBarBuilder
 from tests.helpers import load_bars, make_handle, corpus_spec, corpus_spec_bracket, open_journal
@@ -192,3 +194,55 @@ def test_book_captured_before_probe_run(test_so_bracket, test_feed, tmp_path):
     # agree, positively confirming the staleness above is fill-triggered.
     r4 = P.evaluate(forming_2006, now_ms=forming_2006.ts_open + 1)
     _assert_matches_pre_probe_book(r4.levels, pre_probe_book_2006)
+
+
+def test_same_sig_fills_pair_by_ordinal_not_collapse(monkeypatch):
+    """N3 pin (task-4 re-review): two fills sharing (intent, leg, is_long)
+    on the same bar -- e.g. two pyramided legs closed together by ONE
+    shared exit id -- must pair with their P_other counterpart by ORDINAL
+    position, not collapse onto a single `{sig: ProbeFill}` dict slot
+    (which drops one fill's identity and compares an arbitrary qty pair).
+    No engine needed: `Probe._run` is monkeypatched to return two canned,
+    synthetic `RunResult`s (a P_auto and a P_other) whose trades both
+    close bar `n` under the shared exit id "XL" -- P_other confirms the
+    FIRST leg's qty exactly (1.0) and disagrees on the SECOND's (2.5 vs
+    2.0). Keyed by sig alone, `other_by_sig` (a plain dict comprehension)
+    collapses to ONLY the second (qty 2.5) row -- last write wins -- so
+    the first auto fill would spuriously read `qty_disagreement=True`
+    (1.0 vs 2.5) while its correct, exact-matching counterpart is lost."""
+    n = 10
+
+    def trow(qty: float, entry_bar: int) -> TradeRow:
+        return TradeRow(entry_time=0, exit_time=0, entry_price=100.0, exit_price=100.0, pnl=0.0, pnl_pct=0.0,
+                        is_long=True, qty=qty, commission=0.0, entry_bar_index=entry_bar, exit_bar_index=n,
+                        open_at_end=False, entry_id=f"E{entry_bar}", exit_id="XL", exit_comment="", close_cause=0)
+
+    def run_result(trades: list[TradeRow], position_size: float) -> RunResult:
+        return RunResult(status=0, trades=trades, net_profit=0.0, script_bars_processed=n + 1, broker_state_hash=[],
+                         position_size=position_size, position_avg_price=float("nan"), position_cycle_seq=0,
+                         trail_best_price=float("nan"), current_equity=0.0, last_bar_dual_entry_path=-1, pending_orders=[])
+
+    prev_position_size = 3.0
+    # Auto: two legs sum to 3.0 (matches the ledger's last position exactly
+    # -> position_size 0.0, no _delta_fill residual). Other: the SAME two
+    # legs but the second reads 2.5 instead of 2.0 -- position_size is
+    # adjusted to -0.5 so THAT run's own residual is also fully explained
+    # (isolating the sig-collapse bug from _delta_fill's unrelated logic).
+    canned = [run_result([trow(1.0, 5), trow(2.0, 6)], position_size=0.0),
+              run_result([trow(1.0, 5), trow(2.5, 6)], position_size=-0.5)]
+    calls = {"n": 0}
+    def fake_run(bars, path_order):
+        calls["n"] += 1
+        return canned[calls["n"] - 1]
+
+    fake_ledger = SimpleNamespace(last=SimpleNamespace(book={}, position_size=prev_position_size), n=n, bars=[])
+    forming = T.NormalizedBar(0, 100.0, 105.0, 95.0, 100.0, 1.0, 1, is_forming=True)
+
+    P = Probe(handle=None, spec=None, ledger=fake_ledger, trail_refresh_policy="bar_open_level")
+    monkeypatch.setattr(P, "_run", fake_run)
+
+    r = P.evaluate(forming, now_ms=0, journal=None)
+    assert len(r.fills) == 2
+    by_qty = sorted(r.fills, key=lambda f: f.qty)
+    assert by_qty[0].qty == pytest.approx(1.0) and not by_qty[0].qty_disagreement
+    assert by_qty[1].qty == pytest.approx(2.0) and by_qty[1].qty_disagreement
