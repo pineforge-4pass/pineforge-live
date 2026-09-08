@@ -501,3 +501,48 @@ def test_a_skipped_cycle_top_up_refusal_is_not_counted_as_a_stop_refusal():
     d = R.reconcile(inp(fills, ledger_position=2.0, real_position=0.5, our_signed_fills=0.5, missed_distance_bps=50.0,
                         stop_level=T.StopLevel.FLAT_ONLY))
     assert d.counters.get("refused_by_own_stop") == 2 and "refused_skipped_cycle" not in d.counters
+
+
+def test_a_settle_only_fill_explains_its_own_gap_and_is_not_carried():
+    """NEW-C: `gap_carried` is the G3 input for "quiescent, issued nothing,
+    ledger and our own fills apart". A `SETTLE_ONLY` fill (and an
+    `IN_FLIGHT`, and a `SYNTHETIC`) is booked by the LEDGER at bar n and
+    reported by the venue at n+1 BY CONSTRUCTION -- the caller places the
+    `MARKET_NOW`/`SYNTHETIC_CLOSE` for it from this same settlement -- so a
+    gap of exactly its own signed qty is EXPLAINED, not carried. Counting
+    it moved M5's 2% POOC steady state off `missed` and straight onto the
+    new counter: a breaker on `gap_carried` would breach on the corpus POOC
+    probe (bar 2048: ledger 0, basis 4, `{settle_only: 1, gap_carried: 1}`)."""
+    so = C.ClassifiedFill(C.FillClass.SETTLE_ONLY, C.EmulatedFill("L", "EXIT", True, 4.0, 100.0, 10), None, 4.0, "")
+    d = R.reconcile(inp([so], ledger_position=0.0, real_position=4.0, our_signed_fills=4.0))
+    assert d.corrections == [] and d.counters.get("settle_only") == 1
+    assert "gap_carried" not in d.counters, d.counters
+    # the deliberate hold-flat the counter exists for still counts
+    held = R.reconcile(inp([cf(C.FillClass.MIRROR_EARLY)], ledger_position=1.0, real_position=0.0, our_signed_fills=0.0))
+    assert held.counters["gap_carried"] == 1
+    # and a SETTLE_ONLY fill that explains only PART of the gap still carries the rest
+    part = R.reconcile(inp([so], ledger_position=0.0, real_position=6.0, our_signed_fills=6.0))
+    assert part.counters["gap_carried"] == 1
+
+
+def test_a_corrected_missed_is_not_carried_when_the_top_up_is_refused():
+    """NEW-D: `refused_budget` is a carry cause, but it can come from the
+    QTY_DIVERGENT top-up of a decision whose MISSED was `missed_corrected`
+    -- re-presenting that fill at the next settlement re-bumps `missed` and
+    re-ages `missed_since` for a repair that already shipped. The reconciler
+    is the one that knows which MISSED went uncorrected, so it says so."""
+    fills = [cf(C.FillClass.MISSED, qty=1.0, intent="L1"), cf(C.FillClass.QTY_DIVERGENT, qty=0.5, intent="L2")]
+    d = R.reconcile(inp(fills, ledger_position=10.0, real_position=0.0, our_signed_fills=0.0,
+                        cfg=cfg(budget_notional=150.0)))
+    assert [x.kind for x in d.corrections] == ["MARKET_CORRECT"]
+    assert d.counters.get("missed_corrected") == 1 and d.counters.get("refused_budget") == 1
+    assert d.uncorrected_missed == []
+    # a MISSED whose OWN correction the budget refused IS uncorrected
+    refused = R.reconcile(inp([cf(C.FillClass.MISSED, qty=1.0)], ledger_position=10.0, real_position=0.0,
+                              our_signed_fills=0.0, cfg=cfg(budget_notional=50.0)))
+    assert refused.corrections == [] and refused.counters.get("refused_budget") == 1
+    assert [x.cls for x in refused.uncorrected_missed] == [C.FillClass.MISSED]
+    # and a non-quiescent decision, which never looked at them at all, carries every one
+    skipped = R.reconcile(inp([cf(C.FillClass.MISSED)], quiescent=False))
+    assert skipped.counters == {"skipped_not_quiescent": 1}
+    assert [x.cls for x in skipped.uncorrected_missed] == [C.FillClass.MISSED]

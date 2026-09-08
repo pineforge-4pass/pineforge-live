@@ -6,7 +6,7 @@ comes back."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pineforge_live import types as T
-from .classify import ClassifiedFill, FillClass, EmulatedFill
+from .classify import ClassifiedFill, FillClass, EmulatedFill, _side_for_leg
 from .riskguard import stronger
 
 #: Every counter name `reconcile()` can `bump()` -- the reconciler's whole
@@ -136,10 +136,24 @@ class ReconcileDecision:
     un-issued TOP_UP leg only -- the REDUCE_ONLY_TRIM half, when it ships,
     is not reflected here. `counters` is a bag of
     `bump()` tallies for observability/tests -- not spec-normative, just
-    named the way the reconciler's own reasoning names its branches."""
+    named the way the reconciler's own reasoning names its branches.
+
+    `uncorrected_missed` (NEW-D) is the MISSED `ClassifiedFill`s this
+    decision did NOT repair -- what the caller re-presents at the next
+    settlement (`live.CARRY_CAUSES`) so they keep ageing against `[r4]`'s
+    bound. There is at most ONE MISSED correction per decision and it
+    explains the whole aggregate gap, so this is empty whenever
+    `missed_corrected` was bumped and every MISSED fill otherwise: a caller
+    filtering `classified` itself cannot tell the two apart, and
+    `refused_budget` from the QTY_DIVERGENT top-up of a decision whose
+    MISSED WAS corrected made it re-present a repaired fill. On the FLATTEN
+    path only the missed ENTRIES are uncorrected -- the flatten itself
+    covers a missed exit. Non-quiescent decisions never looked at any of
+    them, so all of them are uncorrected."""
     corrections: list[CorrectionRequest] = field(default_factory=list)
     stop: tuple[T.StopLevel, T.StopDisposition, str] | None = None
     skipped_cycle: bool = False; residual_qty: float = 0.0; counters: dict[str, int] = field(default_factory=dict)
+    uncorrected_missed: list[ClassifiedFill] = field(default_factory=list)
 
 def _side_for(delta: float) -> T.Side:
     return T.Side.BUY if delta > 0 else T.Side.SELL
@@ -382,7 +396,10 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
     d = ReconcileDecision()
     def bump(k): d.counters[k] = d.counters.get(k, 0) + 1
     if not inp.quiescent:
-        bump("skipped_not_quiescent"); return d
+        # NEW-D: nothing was looked at, so every MISSED fill is uncorrected.
+        bump("skipped_not_quiescent")
+        d.uncorrected_missed = [c for c in inp.classified if c.cls == FillClass.MISSED and c.emulated is not None]
+        return d
 
     band = inp.dead_band.qty(inp.price)
     basis = inp.our_signed_fills
@@ -395,6 +412,13 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
     qty_divergent: list[ClassifiedFill] = []
     need_flatten = False
     flatten_cause: str | None = None
+    # NEW-C: the signed qty of the fills the LEDGER booked at bar n that the
+    # venue reports at n+1 BY CONSTRUCTION -- `SETTLE_ONLY` (spec §4 settle
+    # 6's `process_orders_on_close`), `IN_FLIGHT` (a non-terminal action of
+    # ours) and `SYNTHETIC` (an engine-forced close the caller places NOW).
+    # Each EXPLAINS a `ledger - basis` gap of exactly its own size, so the
+    # `gap_carried` band test below nets them out.
+    explained = 0.0
     for c in inp.classified:
         e, cls = c.emulated, c.cls
         if cls == FillClass.MISSED:
@@ -430,6 +454,10 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
             # not a fill the venue missed, so no MISSED bound, no budget
             # and no `[r4]` age applies to it.
             bump(cls.value.lower())
+            if e is not None and cls is not FillClass.CONFIRMED:
+                # NEW-C: a CONFIRMED fill the venue already reported is in
+                # `basis` and explains nothing; the other three are not yet.
+                explained += e.qty if _side_for_leg(e.is_long, e.leg) is T.Side.BUY else -e.qty
 
     # ---- X13: the ledger and our OWN fills point OPPOSITE ways (both
     # nonzero), so every MISSED gate below necessarily fails and no
@@ -476,6 +504,7 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
             # this decision's own FLAT_ONLY escalation anyway (a MISSED
             # exit is covered by the flatten itself).
             d.skipped_cycle = True; bump("refused_by_own_stop")
+            d.uncorrected_missed = list(missed_entries)   # NEW-D: a missed EXIT is covered by the flatten itself
         return d
 
     if not account_mismatch:
@@ -509,7 +538,18 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
     # MIRROR_EARLY's "hold flat, retain the intent" is exactly this shape
     # and is legal (spec §5.4), and the G3 breaker is what decides whether
     # the RATE of it is not.
-    if not d.corrections and abs(inp.ledger_position - basis) > band:
+    # NEW-C: net out the qty the bar's own SETTLE_ONLY/IN_FLIGHT/SYNTHETIC
+    # fills already explain. Without this every POOC bar counted a
+    # `gap_carried` (corpus POOC probe, bar 2048: ledger 0, basis 4, one
+    # `MARKET_NOW` emitted by the caller and no correction owed) -- the same
+    # 2% steady state M5 took off `missed`, moved onto the counter G3 reads.
+    if not d.corrections and abs((inp.ledger_position - basis) - explained) > band:
         bump("gap_carried")
+
+    # NEW-D: at most one MISSED correction ships per decision and it covers
+    # the whole aggregate gap, so a decision that corrected has nothing left
+    # to carry and one that did not leaves every MISSED fill uncorrected.
+    if "missed_corrected" not in d.counters:
+        d.uncorrected_missed = missed_entries + missed_exits
 
     return d

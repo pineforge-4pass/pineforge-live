@@ -94,7 +94,10 @@ class RiskLimits:
     Enforced by `LiveCore` rather than here, because each needs state this
     module does not hold (n11 -- the old docstring claimed the reconciler
     counted them, which it never did): `max_daily_reconciles` is a per-UTC-day
-    tally of the CORRECTION/FLATTEN actions `settle()` actually emits, and
+    tally of the CORRECTION/FLATTEN actions `settle()` actually emits -- all
+    but the `HARD_FLAT`, which is spec §5.5(c)'s STOP action and not a
+    correction, so it is counted against neither this cap nor
+    `max_order_notional` (NEW-A) -- and
     `disagree_twice` bounds consecutive settlements the reconciler skipped
     as not quiescent (spec §5.4). NOT enforced anywhere yet:
     `max_daily_realized_loss`; `stale_feed_ms`,

@@ -666,6 +666,7 @@ def test_a_quiescent_settle_resets_the_non_quiescent_streak(core):
     c.settle(bars[2000], [], {"L"}, set(), -1.0, 0, our_signed_fills=-1.0)
     c.settle(bars[2001], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
     assert c._not_quiescent_streak == 0
+    assert not c._disagree_alerted        # N-2: a reset re-arms the once-per-crossing incident
 
 
 def test_the_daily_reconcile_cap_refuses_and_skips_the_cycle(test_so, test_feed, tmp_path, monkeypatch):
@@ -701,9 +702,17 @@ def test_the_horizon_alerts_once_then_refuses_the_settle(test_so, test_feed, tmp
     past it runs the engine with a `last_bar_index` BELOW the actual last
     bar. "At 80% consumption the runtime alerts and at 100% forces an
     epoch rotation before the next settlement" -- `RiskGuard.horizon` was
-    written, pinned, and called by nothing."""
+    written, pinned, and called by nothing.
+
+    N-3: the consumption compared against `horizon_bars` is `ledger.n` (the
+    bar COUNT before this settle, i.e. the index of the bar about to be
+    settled), not `ledger.n + 1`. `horizon_bars` IS the frozen
+    `last_bar_index`, so bar index `horizon_bars - 1` is still a legal bar
+    and only bar index `horizon_bars` -- the first one past the frozen tail
+    -- is refused. `n + 1` refused the frozen last bar itself, one bar
+    conservative."""
     from tests.helpers import corpus_spec
-    spec = corpus_spec(horizon_bars=2002)
+    spec = corpus_spec(horizon_bars=2001)
     h = make_handle(test_so, spec)
     m = StopMarker(tmp_path / "j.stop"); m.prepare(); j = Journal.open(tmp_path / "j.sqlite3", stop_marker=m)
     rc = RuntimeConfig(poll_interval_ms=30_000, drain_bound_ms=5_000, grace_ms=3_000, open_wait_ms=2_000, risk_limits={})
@@ -711,9 +720,13 @@ def test_the_horizon_alerts_once_then_refuses_the_settle(test_so, test_feed, tmp
                  [Breaker("missed", 0.01, 500, n_min_for(0.01), 5)])
     bars = load_bars(test_feed, 2300)
     c.seed(bars[:2000])
-    first = c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)      # 2001/2002 -- past 80%
-    assert [x["kind"] for x in first.incidents] == ["horizon_alert"] and first.stop is None
-    second = c.settle(bars[2001], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)     # 2002/2002 -- exhausted
+    # bar index 2000 = horizon_bars - 1: the frozen `last_bar_index` itself,
+    # still a legal bar -- 2000/2001 consumed, past 80%
+    first = c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    assert first.settle is not None and first.stop is None
+    assert [x["kind"] for x in first.incidents] == ["horizon_alert"]
+    assert [(x["consumed"], x["horizon_bars"]) for x in first.incidents] == [(2000, 2001)]
+    second = c.settle(bars[2001], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)     # 2001/2001 -- exhausted
     assert second.settle is None and second.stop == (T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "horizon")
     assert [x["kind"] for x in second.incidents] == ["horizon_exhausted"]
     assert c.ledger.n == 2001                       # the settle was REFUSED, not run
@@ -879,16 +892,128 @@ def test_the_mirror_early_day_tally_survives_a_restart(test_so, test_feed, tmp_p
     """n12: `mirror_early_today` restarted at 0 on every process start, so
     the per-day cap was launderable by bouncing the runtime -- the exact
     thing the cap exists to prevent. It is re-derived from today's
-    journaled `reconciles` rows at construction."""
+    journaled `reconciles` rows at construction.
+
+    NEW-B: and it has to survive the reborn core's FIRST settle. `_day`
+    started `None`, so `_roll_day` read "the day changed" on that settle and
+    zeroed both tallies -- the restore was dead code and the cap exactly as
+    launderable as before. The clock is frozen inside bar 2001's own UTC day
+    here because the restore joins the journal's wall-clock `created_ms`
+    while `_roll_day` rolls on the settled bar's `ts_open`, and the corpus
+    tape is 2020 (see `_restore_day_counters` on the two clocks)."""
     import pineforge_live.core.live as live
     c, j = _core(test_so, tmp_path)
     bars = load_bars(test_feed, 2300)
+    monkeypatch.setattr(live.time, "time", lambda: bars[2001].ts_open / 1000.0)
     c.seed(bars[:2000])
     early = ClassifiedFill(FillClass.MIRROR_EARLY, None,
                            VenueFill("x", "EXIT", T.Side.SELL, 1.0, bars[2000].c, 2000, T.FillCause.OURS, "c"), 1.0, "")
     monkeypatch.setattr(live, "classify_bar", lambda *a, **k: [early])
     c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
     assert c.mirror_early_today == 1
-    reborn = LiveCore(c.h, c.spec, j, c.marker, c.rc, LIMITS, DeadBand(0.001, 0.001, 5.0),
+    reborn = LiveCore(make_handle(test_so, c.spec), c.spec, j, c.marker, c.rc, LIMITS, DeadBand(0.001, 0.001, 5.0),
                       [Breaker("missed", 0.01, 500, n_min_for(0.01), 5)])
     assert reborn.mirror_early_today == 1
+    monkeypatch.setattr(live, "classify_bar", lambda *a, **k: [])
+    reborn.seed(bars[:2001])
+    reborn.settle(bars[2001], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    assert reborn.mirror_early_today == 1
+
+
+def test_a_hard_flat_is_not_gated_by_the_daily_correction_cap(test_so, test_feed, tmp_path, monkeypatch):
+    """NEW-A, first arm: `max_daily_reconciles` is the low-n guard on
+    CORRECTIONS. The HARD_FLAT is not one -- spec §5.5(c) makes it the
+    STOP's own disposition acting on venue truth -- but it carries
+    `kind="FLATTEN"`, so the cap refused it and counted it, and M3's hole
+    (a liquidation residual sitting under HARD forever) reopened on any day
+    the runtime had already corrected `max_daily_reconciles` times."""
+    import pineforge_live.core.live as live
+    limits = RiskLimits(1e6, 1e12, 1e9, 8, 32, 1e9, 1, 60_000, 60_000, 3, 2, 2.0, 1.0, 5_000)
+    c, j = _core(test_so, tmp_path, limits=limits)
+    bars = load_bars(test_feed, 2300)
+    c.seed(bars[:2000])
+    missed = [ClassifiedFill(FillClass.MISSED, EmulatedFill("L", "ENTRY", False, 1.0, bars[2000].c, 2000), None, 1.0, "")]
+    monkeypatch.setattr(live, "classify_bar", lambda *a, **k: missed)
+    first = c.settle(bars[2000], [], set(), set(), 0.0, 0, our_signed_fills=0.0)
+    assert [a.kind for a in first.actions if a.kind == "CORRECTION"] == ["CORRECTION"] and c.reconciles_today == 1
+    liq = VenueFill(None, None, T.Side.BUY, 2.0, bars[2001].c, 2001, T.FillCause.LIQUIDATION, None)
+    monkeypatch.setattr(live, "classify_bar",
+                        lambda *a, **k: [ClassifiedFill(FillClass.UNATTRIBUTED_VENUE, None, liq, 1.0, "")])
+    out = c.settle(bars[2001], [liq], set(), set(), 1.0, 0, our_signed_fills=1.0)
+    assert out.stop == (T.StopLevel.HARD, T.StopDisposition.FLATTEN, "venue-initiated fill")
+    assert [(a.side, a.qty, a.reduce_only, a.cls) for a in out.actions if a.kind == "FLATTEN"] == \
+           [(T.Side.SELL, 1.0, True, "HARD_FLAT")]
+    assert c.reconciles_today == 1                       # a STOP action, never counted against the correction cap
+    assert "max_daily_reconciles" not in [x["kind"] for x in out.incidents], out.incidents
+
+
+def test_a_hard_flat_is_not_gated_by_the_per_order_notional_budget(test_so, test_feed, tmp_path):
+    """NEW-A, second arm: the same order went through
+    `check_order_notional`, so a liquidation residual larger than one
+    order's notional budget could never be flattened. The exposure is the
+    venue's ALREADY-HELD position and the order only reduces it -- the
+    reconciler's own `FLATTEN` to `real_position` carries exactly the same
+    exposure and is not budget-gated either (pre-existing, accepted)."""
+    limits = RiskLimits(1e6, 1e12, 100.0, 8, 32, 1e9, 50, 60_000, 60_000, 3, 2, 2.0, 1.0, 5_000)
+    c, j = _core(test_so, tmp_path, limits=limits)
+    bars = load_bars(test_feed, 2300)
+    c.seed(bars[:2000])
+    liq = VenueFill(None, None, T.Side.BUY, 6.0, bars[2000].c, 2000, T.FillCause.LIQUIDATION, None)
+    out = c.settle(bars[2000], [liq], set(), set(), 5.0, 0, our_signed_fills=5.0)
+    assert out.stop == (T.StopLevel.HARD, T.StopDisposition.FLATTEN, "venue-initiated fill")
+    assert [(a.qty, a.reduce_only, a.cls) for a in out.actions if a.kind == "FLATTEN"] == [(5.0, True, "HARD_FLAT")]
+    assert [x for x in out.incidents if x["kind"] == "risk_refused" and x["action"] == "FLATTEN"] == []
+
+
+def test_a_refused_hard_flat_is_re_issued_on_the_next_bar(core, monkeypatch):
+    """NEW-A, third arm: `_hard_flat_issued` was set BEFORE `_permitted`
+    ran, so a HARD_FLAT the gate refused was never retried on any later bar
+    of the process while the venue kept the position -- the one thing the
+    once-only flag must not do."""
+    c, bars, j = core
+    c.seed(bars[:2000])
+    liq = VenueFill(None, None, T.Side.BUY, 2.0, bars[2000].c, 2000, T.FillCause.LIQUIDATION, None)
+    monkeypatch.setattr(c.stop, "permits", lambda *a, **k: False)
+    out = c.settle(bars[2000], [liq], set(), set(), 1.0, 0, our_signed_fills=1.0)
+    assert [a for a in out.actions if a.kind == "FLATTEN"] == [] and not c._hard_flat_issued
+    monkeypatch.undo()
+    again = c.settle(bars[2001], [], set(), set(), 1.0, 0, our_signed_fills=1.0)
+    assert [(a.qty, a.cls) for a in again.actions if a.kind == "FLATTEN"] == [(1.0, "HARD_FLAT")]
+    assert c._hard_flat_issued
+
+
+def test_the_disagree_twice_incident_is_journaled_once_per_crossing(core):
+    """N-2: the STOP is idempotent (`raise_stop` is monotonic) but the
+    incident was journaled on EVERY settle the streak stayed at or past the
+    bound, so a driver stuck non-quiescent wrote one row per bar forever.
+    One incident per crossing, like `horizon_alert`."""
+    c, bars, j = core
+    c.seed(bars[:2000])
+    outs = [c.settle(bars[i], [], {"L"}, set(), -1.0, 0, our_signed_fills=-1.0) for i in range(2000, 2004)]
+    assert [len([x for x in o.incidents if x["kind"] == "disagree_twice"]) for o in outs] == [0, 1, 0, 0]
+    assert len(j.rows("incidents", "kind=?", ("disagree_twice",))) == 1
+
+
+def test_an_aborted_first_evaluate_does_not_consume_the_withdraw(core, monkeypatch):
+    """NEW-E: `_triggered_bar` was advanced on the FIRST `evaluate()` of a
+    bar even when the probe ABORTED (engine NOT_COMPLETED), so every later
+    tick read `first_evaluate == False` and `_withdraw_unconfirmed` never
+    ran -- an unconfirmed settle-time advance survived to the venue in
+    exactly the case B3 has the least information about it. An aborted
+    result decided nothing and must consume no one-shot marker."""
+    c, bars, j = core
+    c.seed(bars[:2000])
+    c.settle(bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    pending = dict(c.pending_market)
+    assert pending
+    ticks = ticks_for(bars[2001], c.spec.script_tf)
+    fb = FormingBarBuilder(c.spec.script_tf); fb.push(ticks[0])
+    monkeypatch.setattr(c.probe, "evaluate", lambda forming, now_ms, journal=None:
+                        ProbeResult(2001, forming, [], [], [], {}, False, 1.0, False, [], aborted=True))
+    first = c.evaluate(fb.forming(), now_ms=ticks[0].ts)
+    assert first.actions == [] and c.pending_market == pending      # nothing withdrawn on an abort
+    monkeypatch.setattr(c.probe, "evaluate", lambda forming, now_ms, journal=None: _probe_result(2001, forming, []))
+    fb.push(ticks[1])
+    second = c.evaluate(fb.forming(), now_ms=ticks[1].ts)
+    assert {(a.kind, a.qty, a.reason) for a in second.actions} == {("MARKET_AT_OPEN", 0.0, "withdraw")}
+    assert len(second.actions) == len(pending) and c.pending_market == {}

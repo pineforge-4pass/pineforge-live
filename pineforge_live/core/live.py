@@ -43,8 +43,13 @@ CARRY_CAUSES = frozenset({"skipped_not_quiescent", "refused_budget", "refused_by
 
 #: `CorrectionRequest` kinds counted against `max_daily_reconciles` (m8),
 #: and the reconciler counters that name them in a journaled `reconciles`
-#: row -- the two must agree, since the day's tally is re-derived from
-#: those rows after a restart.
+#: row -- the day's tally is re-derived from those rows after a restart, so
+#: the two are the same quantity read two ways. They do NOT agree exactly
+#: (N-4): the counters are bumped at EMIT time by the reconciler, the live
+#: tally counts only requests `_permitted` let through, and the HARD_FLAT
+#: (`cls="HARD_FLAT"`, a STOP action, not a correction -- NEW-A) is counted
+#: by neither. Both differences make the restored tally an OVER-count of
+#: what was actually sent, i.e. the cap binds sooner, never later.
 RECONCILING_KINDS = frozenset({"CORRECTION", "FLATTEN"})
 RECONCILING_COUNTERS = ("missed_corrected", "topped_up", "trimmed", "flattened")
 
@@ -181,8 +186,11 @@ class LiveCore:
         # today's journaled `reconciles` rows at construction, so neither
         # cap is launderable by restarting the process; `_roll_day` zeroes
         # them at the settled bar's own day boundary from then on.
-        self.mirror_early_today, self.reconciles_today = self._restore_day_counters()
+        # NEW-B: `_restore_day_counters` also sets `_day` to the day it
+        # summed. Leaving it `None` made the very first `settle()` read "the
+        # day changed" and zero both tallies, so the restore was dead code.
         self._day: int | None = None
+        self.mirror_early_today, self.reconciles_today = self._restore_day_counters()
         # spec §4 settle 6: the MARKET legs this settlement asked for at the
         # NEXT bar's open, keyed by (intent id, leg). `evaluate()` on that
         # bar suppresses its own TRIGGER for the same (intent, leg) -- they
@@ -200,11 +208,16 @@ class LiveCore:
         self._carried_missed: list[ClassifiedFill] = []
         # M4(b): consecutive settlements the reconciler skipped as not
         # quiescent -- spec §5.4's "skip (bounded) and count toward
-        # disagree_twice".
+        # disagree_twice". N-2: the incident is one per CROSSING of the
+        # bound (like `horizon_alert`), not one per bar the streak stays
+        # past it -- the STOP is already idempotent.
         self._not_quiescent_streak = 0
-        # M3: the HARD_FLAT this run has already asked for, so a restart
-        # (which re-reads it off the journal) re-issues one only if the
-        # venue still holds a position.
+        self._disagree_alerted = False
+        # M3: the HARD_FLAT this run has already asked for. Deliberately
+        # NOT durable (N-1): a restart starts it False, and the re-issue
+        # guard on the new process is `real_position != 0` alone -- the
+        # venue's own word about whether anything is still there to flatten,
+        # which is the only thing worth acting on.
         self._hard_flat_issued = False
         # m7: the horizon alert is one incident per crossing, not one per bar.
         self._horizon_alerted = False
@@ -277,7 +290,15 @@ class LiveCore:
             self._incident(out, "action_refused_by_stop", action=a.kind, intent=a.intent, qty=a.qty,
                            level=self.stop.level.value, disposition=self.stop.disposition.value)
             return False
-        if a.qty > 0.0:
+        if a.qty > 0.0 and a.cls != "HARD_FLAT":
+            # NEW-A: the HARD_FLAT is spec §5.5(c)'s STOP action, not an
+            # order the runtime chose to size, and neither RiskGuard budget
+            # applies to it: the exposure is the position the venue ALREADY
+            # holds and this order only reduces it. (The reconciler's own
+            # `FLATTEN` to `real_position` carries exactly the same exposure
+            # and is not exempt -- pre-existing since 4dab261, accepted: it
+            # is a correction, and a correction the budget refuses is a
+            # journaled refusal the reconciler can re-derive next bar.)
             cause = self.guard.check_order_notional(a.qty, price)
             if cause is None and not a.reduce_only:
                 # Conservative bound: an exposure-increasing action can at
@@ -411,16 +432,23 @@ class LiveCore:
         per bar); the rotation is `STOP(FLAT_ONLY)` plus a REFUSED settle
         -- refusing is what "before the next settlement" means, and the
         rotation itself is an operator ceremony (spec §6), not something
-        the core performs. Returns False when the settle must not run."""
-        state = self.guard.horizon(self.ledger.n + 1, self.spec.horizon_bars)
+        the core performs. Returns False when the settle must not run.
+
+        N-3: consumption is `ledger.n` -- the bar COUNT before this settle,
+        which is also the INDEX of the bar about to be settled. Since
+        `horizon_bars` IS the frozen `last_bar_index`, bar index
+        `horizon_bars - 1` is a legal bar and bar index `horizon_bars` (the
+        first past the frozen tail) is the one refused. `n + 1` refused the
+        frozen last bar itself, one bar conservative."""
+        state = self.guard.horizon(self.ledger.n, self.spec.horizon_bars)
         if state == "rotate":
-            self._incident(out, "horizon_exhausted", consumed=self.ledger.n + 1, horizon_bars=self.spec.horizon_bars)
+            self._incident(out, "horizon_exhausted", consumed=self.ledger.n, horizon_bars=self.spec.horizon_bars)
             self._raise(out, T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "horizon")
             return False
         if state == "alert":
             if not self._horizon_alerted:
                 self._horizon_alerted = True
-                self._incident(out, "horizon_alert", consumed=self.ledger.n + 1, horizon_bars=self.spec.horizon_bars)
+                self._incident(out, "horizon_alert", consumed=self.ledger.n, horizon_bars=self.spec.horizon_bars)
         else:
             self._horizon_alerted = False
         return True
@@ -598,7 +626,13 @@ class LiveCore:
         if dec.skipped_cycle:
             self._incident(out, "cycle_skipped", bar_index=s.bar_index)
         if CARRY_CAUSES & set(dec.counters):
-            self._carried_missed = [c for c in classified if c.cls is FillClass.MISSED]
+            # NEW-D: `dec.uncorrected_missed`, not every MISSED in
+            # `classified`. `refused_budget` can come from the QTY_DIVERGENT
+            # top-up of a decision whose MISSED was `missed_corrected`, and
+            # re-presenting a repaired fill re-bumps `missed` and re-ages
+            # `missed_since` for a bar. The reconciler is the one that knows
+            # which of them it declined to correct.
+            self._carried_missed = list(dec.uncorrected_missed)
         # M4(b), spec §5.4: "else skip (bounded) and count toward
         # disagree_twice". A driver whose actions never go terminal makes
         # every settlement non-quiescent, and the reconciler then does
@@ -607,10 +641,13 @@ class LiveCore:
         if "skipped_not_quiescent" in dec.counters:
             self._not_quiescent_streak += 1
             if self._not_quiescent_streak >= self.limits.disagree_twice:
-                self._incident(out, "disagree_twice", settles=self._not_quiescent_streak)
+                if not self._disagree_alerted:      # N-2: one incident per crossing
+                    self._disagree_alerted = True
+                    self._incident(out, "disagree_twice", settles=self._not_quiescent_streak)
                 self._raise(out, T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "disagree_twice")
         else:
             self._not_quiescent_streak = 0
+            self._disagree_alerted = False
         for name, breached, alerting in self._observe_breakers(dec.counters):
             if breached:
                 self._incident(out, "g3_breached", breaker=name)
@@ -620,7 +657,8 @@ class LiveCore:
 
         capped = False
         for a in self._requests(out, s, dec, classified, price, prev_book, in_flight, mirrored, real_position):
-            if a.kind in RECONCILING_KINDS and self.reconciles_today >= self.limits.max_daily_reconciles:
+            if (a.cls != "HARD_FLAT" and a.kind in RECONCILING_KINDS
+                    and self.reconciles_today >= self.limits.max_daily_reconciles):
                 # m8, spec §5.5: `max_daily_reconciles` is the low-n guard
                 # on corrections -- the G3 rate breakers are alert-only
                 # below their own `n_min`, so a runtime correcting every
@@ -632,7 +670,12 @@ class LiveCore:
                 continue
             if self._permitted(out, a, s.position_size, price):
                 out.actions.append(a)
-                if a.kind in RECONCILING_KINDS:
+                if a.cls == "HARD_FLAT":
+                    # NEW-A: set only once the request has PASSED the gate --
+                    # a refused HARD_FLAT must still be retried while the
+                    # venue holds the position.
+                    self._hard_flat_issued = True
+                elif a.kind in RECONCILING_KINDS:
                     self.reconciles_today += 1
         if capped and not dec.skipped_cycle:
             self._incident(out, "cycle_skipped", bar_index=s.bar_index)
@@ -696,8 +739,9 @@ class LiveCore:
         boundary of the settled bar's own open rather than growing for the
         life of the process."""
         day = bar.ts_open // DAY_MS
-        if self._day != day:
-            self._day, self.mirror_early_today, self.reconciles_today = day, 0, 0
+        if self._day is not None and self._day != day:
+            self.mirror_early_today, self.reconciles_today = 0, 0
+        self._day = day
 
     def _restore_day_counters(self) -> tuple[int, int]:
         """Today's `mirror_early` count and reconciling-action count, read
@@ -715,8 +759,13 @@ class LiveCore:
         settle as they close; they can disagree when a tape is replayed
         through the same journal, and the restore is then a bounded
         over-count on the first bar -- conservative in the direction that
-        matters (the cap binds sooner, never later)."""
+        matters (the cap binds sooner, never later).
+
+        Sets `self._day` to the day it summed (NEW-B), so the first
+        `_roll_day` of a live run recognises the restored day as its own
+        instead of rolling over it."""
         day_start = int(time.time() * 1000) // DAY_MS * DAY_MS
+        self._day = day_start // DAY_MS
         mirror_early = reconciling = 0
         for row in self.j.rows("reconciles", "epoch_hash=? AND created_ms>=?", (self.spec.epoch_hash(), day_start)):
             counters = json.loads(row["detail_json"] or "{}")
@@ -774,13 +823,15 @@ class LiveCore:
         # acting on venue truth -- and without it an ADL/manual/partial
         # liquidation left the remaining venue position sitting under
         # HARD, where `permits()` allows no new reduce-only order except
-        # this one, indefinitely. Emitted once: `_hard_flat_issued` is
-        # journaled as an incident so a restart re-issues only if the
-        # venue still holds a position.
+        # this one, indefinitely. Emitted once per process, and re-issued
+        # after a restart only if the venue still holds a position (N-1:
+        # `_hard_flat_issued` is NOT durable -- `real_position != 0` is the
+        # whole guard on the new process). NEW-A: the flag is set by
+        # `settle()` once the request has PASSED the gate, not here, so a
+        # refused HARD_FLAT is still retried on the next bar.
         if (self.stop.disposition is T.StopDisposition.FLATTEN and real_position != 0.0
                 and not any(a.kind == "FLATTEN" for a in reqs)):
             if not self._hard_flat_issued:
-                self._hard_flat_issued = True
                 self._incident(out, "hard_flat", qty=abs(real_position), cause=self.stop.cause)
                 reqs.append(ActionRequest("FLATTEN", None, T.Side.SELL if real_position > 0 else T.Side.BUY,
                                           abs(real_position), None, True, "HARD_FLAT", self.stop.cause, s.bar_index))
@@ -864,7 +915,13 @@ class LiveCore:
         out.probe = pr
         out.book = self.book
         first_evaluate = self._triggered_bar != pr.bar_index
-        if first_evaluate:
+        if first_evaluate and not pr.aborted:
+            # NEW-E: an ABORTED result DECIDED nothing (every list is empty
+            # by construction), so it must not consume this bar's one-shot
+            # markers. Advancing here made `first_evaluate` False for every
+            # later tick of the bar and `_withdraw_unconfirmed` never ran --
+            # an unconfirmed advance survived to the venue in exactly the
+            # case B3 has the least information about it.
             self._triggered_bar, self._triggered = pr.bar_index, set()
         position = self.ledger.last.position_size if self.ledger.last is not None else 0.0
         price = forming.c
