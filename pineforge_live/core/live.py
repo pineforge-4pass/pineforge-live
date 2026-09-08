@@ -339,8 +339,15 @@ class LiveCore:
                 # transaction. Sizing this leg `min(|qty|, |pos|)` therefore
                 # produced a sub-dead-band leg that was dropped, the venue
                 # never closed, and the ledger's own close read MISSED a bar
-                # later. A partial transaction surfaces as QTY_DIVERGENT at
-                # the next settlement, which the reconciler trims.
+                # later. NEW-5: a PARTIAL transaction then leaves the venue
+                # OVER-closed relative to the ledger -- the ledger keeps
+                # `live - tx` on the same side while the venue is flat --
+                # so what the next settlement sees is a shortfall (a
+                # budgeted, FLAT_ONLY-gated TOP_UP), not an excess to trim;
+                # and the ledger's own partial reduce is a `"?"`-intent
+                # delta EXIT, so it is classified MISSED/unattributed
+                # rather than QTY_DIVERGENT. The `abs(pos)` sizing here is
+                # the ABI-forced choice either way.
                 close_qty, open_qty = (abs(pos) if opposite else 0.0), 0.0
             else:
                 close_qty, open_qty = (abs(pos) if opposite else 0.0), qty

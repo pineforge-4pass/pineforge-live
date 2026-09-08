@@ -48,11 +48,13 @@ assertions:
   settle). Path-variant fills — confirmed by `P_auto` only — are counted
   separately, since they settle as `PATH_DIVERGENT`.
 
-The venue honours `ActionRequest`'s supersede contract, so the `open_requote`
-pair (`settle(n)`'s advance MARKET leg and bar `n+1`'s open-priced re-quote of
-it) is filled once, not twice. It exits non-zero on any `g1_failures`,
-`probe_not_settled`, or **STOP** — a STOP mid-window refuses actions and
-changes the very stream the two assertions are about.
+The venue honours `ActionRequest`'s supersede contract, so a settle-time advance
+MARKET leg and any open-priced re-quote of it at bar `n+1` are filled once, not
+twice. It exits non-zero on any `g1_failures`, `probe_not_settled`, or **STOP**
+— raised by `settle()` or by `evaluate()` — because a STOP mid-window refuses
+actions and changes the very stream the two assertions are about. A refused
+`seed()` is reported the same way (`report["seed"]`, exit 1) instead of dying
+with a message.
 
 ```sh
 PINEFORGE_ENGINE_ROOT=~/code/pineforge-engine-wt/main python3 scripts/l1_harness.py \
@@ -62,9 +64,9 @@ PINEFORGE_ENGINE_ROOT=~/code/pineforge-engine-wt/main python3 scripts/l1_harness
 ```
 
 ```
-l1: bars 200 settle_fills 16 probe_fills 16 retracts 0 probe_not_settled 0 path_variant 0 superseded 16 stops 0 incidents 0 non_confirmed 0 g1_failures 0 recompute_ms_p99_settle 6 recompute_ms_p99_probe 11
-l1: recompute_ms settle p50 5 p99 6 max 6 (n 200)
-l1: recompute_ms probe  p50 5 p99 11 max 11 (n 800)
+l1: bars 200 settle_fills 16 probe_fills 16 retracts 0 probe_not_settled 0 path_variant 0 superseded 0 stops 0 incidents 0 non_confirmed 0 g1_failures 0 recompute_ms_p99_settle 5.722 recompute_ms_p99_probe 10.245
+l1: recompute_ms settle p50 5.168 p99 5.722 max 6.578 (n 200)
+l1: recompute_ms probe  p50 5.192 p99 10.245 max 10.474 (n 800)
 ```
 
 The bracket probe (`ta-pivot-atr-stop-target-01`: ATR stop/target via
@@ -72,19 +74,40 @@ The bracket probe (`ta-pivot-atr-stop-target-01`: ATR stop/target via
 the same window, which additionally exercises priced-exit `TRIGGER`s:
 
 ```
-l1: bars 200 settle_fills 13 probe_fills 13 retracts 0 probe_not_settled 0 path_variant 0 superseded 6 stops 0 incidents 0 non_confirmed 0 g1_failures 0 recompute_ms_p99_settle 9 recompute_ms_p99_probe 18
-l1: recompute_ms settle p50 8 p99 9 max 10 (n 200)
-l1: recompute_ms probe  p50 8 p99 18 max 20 (n 800)
+l1: bars 200 settle_fills 13 probe_fills 13 retracts 0 probe_not_settled 0 path_variant 0 superseded 0 stops 0 incidents 0 non_confirmed 0 g1_failures 0 recompute_ms_p99_settle 9.016 recompute_ms_p99_probe 17.211
+l1: recompute_ms settle p50 8.144 p99 9.016 max 9.392 (n 200)
+l1: recompute_ms probe  p50 8.178 p99 17.211 max 17.753 (n 800)
 ```
 
-`superseded` is the count of requests the venue never saw because a later
-request replaced them — 2 per reversal bar for the sma probe (the close leg and
-the open leg of the same reversal, each re-quoted at the open), 1 per entry bar
-for the bracket probe. It is not an error; a run with the supersede contract
-ignored would instead show doubled fills and a STOP.
+And the POOC probe (`order-deferred-flip-pooc-cross-bar-01`:
+`process_orders_on_close=true`, so the `strategy.close` fires at the cross bar's
+own close while the stop entry waits for the next open — same feed and syminfo
+again), the fixture spec §4 settle 6's "`process_orders_on_close` fills → MARKET
+now" is about:
 
-Those are the first real `recompute_ms` numbers on this machine (2000 bars of
-history, macOS, one core; ±1 ms run to run): they are what spec §2's
+```
+l1: bars 200 settle_fills 8 probe_fills 4 retracts 0 probe_not_settled 0 path_variant 0 superseded 0 stops 0 incidents 0 non_confirmed 4 g1_failures 0 recompute_ms_p99_settle 5.418 recompute_ms_p99_probe 10.046
+l1: recompute_ms settle p50 4.938 p99 5.418 max 5.575 (n 200)
+l1: recompute_ms probe  p50 4.938 p99 10.046 max 10.444 (n 800)
+```
+
+Its four non-`CONFIRMED` classifications are the four POOC closes in the window,
+each `SETTLE_ONLY` → one reduce-only `MARKET_NOW` on its own bar. Zero of them
+are `MISSED`: a POOC fill is not a fill the venue missed, and routing it through
+the reconciler put a 2% steady-state orphan rate through the spec's own 1%
+breaker.
+
+`superseded` is the count of requests the venue never saw because a later
+request replaced them. It is 0 on all three probes because these fixtures size
+at partition 1 (fixed qty), so the engine's qty at the open equals the
+settle-time close proxy and the advance needs no re-quote; a percent-of-equity
+(partition 3) script re-quotes and the count rises. It is not an error either
+way — a run with the supersede contract ignored would instead show doubled fills
+and a STOP.
+
+Those are the `recompute_ms` numbers on this machine (2000 bars of history,
+macOS, one core; ±1 ms run to run, and float milliseconds because a probe
+recompute can be sub-millisecond): they are what spec §2's
 `grace ≥ recompute_p99 + submit_p99` has to be sized against, and they grow
 with the history the ledger recomputes — re-measure per epoch rather than
 assuming these. The probe's p99 is roughly double its own median because a bar
@@ -93,7 +116,11 @@ with any fill runs `P_auto` **and** `P_other`.
 `--out` writes the whole report: per bar the probe fills, retracts,
 path-variant fills, settlement fills, the actions requested and the (superseded)
 set the venue actually saw, any STOP/incident/non-`CONFIRMED` class, G1 status
-and both recompute times, plus the summary above.
+and both recompute times, plus the summary above and a `seed` section (the STOP
+and incidents of a refused seed).
+
+The three runs above are the release criterion for the core: each exits 0 with
+`probe_not_settled 0`, `g1_failures 0` and `stops 0`.
 
 ## Tests
 `PINEFORGE_ENGINE_ROOT=~/code/pineforge-engine-wt/main python3 -m pytest -q`

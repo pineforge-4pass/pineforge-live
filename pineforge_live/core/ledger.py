@@ -132,7 +132,7 @@ class SettleResult:
     new_closed: list[TradeKey]; new_opened: list[TradeKey]; hashes: list[int]
     position_size: float; position_avg_price: float | None; equity: float; equity_mtm: float
     pending_orders: list[dict[str, Any]]; cycle_seq: int; trail_best: float | None
-    recompute_ms: int; trades_sha256: str
+    recompute_ms: float; trades_sha256: str
     position_delta: float; prev_position_size: float; entry_fills: list[dict[str, Any]]
     book: dict[str, "Intent"]
 
@@ -174,7 +174,7 @@ class Ledger:
         """Number of bars the ledger has settled so far (0 before `seed()`)."""
         return len(self.bars)
 
-    def _run(self, bars: list[T.NormalizedBar]) -> tuple[RunResult, int]:
+    def _run(self, bars: list[T.NormalizedBar]) -> tuple[RunResult, float]:
         """Runs the engine over `bars` from a fresh recompute and raises
         `RecomputeAborted` if the engine reports a NOT_COMPLETED run
         (`status != 0`) -- never journaled, and `bars` is a plain local
@@ -183,7 +183,11 @@ class Ledger:
         r = self.h.run_full([b.ohlcv() for b in bars], self.spec.script_tf)
         if r.status != 0:
             raise RecomputeAborted("settle recompute aborted")
-        return r, int((time.perf_counter() - t0) * 1000)
+        # Float milliseconds, to 1 us: spec §2 sizes `grace` off
+        # `recompute_p99 + submit_p99`, and an integer read floors a
+        # 900 us recompute to 0 -- a p99 of "0 ms" is not a latency
+        # budget, it is a rounding artefact.
+        return r, round((time.perf_counter() - t0) * 1000, 3)
 
     def _settled_book(self, r: RunResult) -> dict[str, "Intent"]:
         """Computes `core.book.settled_book(self.h, r)` -- MUST be called
@@ -199,7 +203,7 @@ class Ledger:
         from .book import settled_book
         return settled_book(self.h, r)
 
-    def _result(self, bars: list[T.NormalizedBar], r: RunResult, ms: int, prev: SettleResult | None,
+    def _result(self, bars: list[T.NormalizedBar], r: RunResult, ms: float, prev: SettleResult | None,
                 book: dict[str, "Intent"]) -> SettleResult:
         """Builds this run's `SettleResult` from the engine's `RunResult`
         over the (still-staged) full `bars`. Enforces the hash_len

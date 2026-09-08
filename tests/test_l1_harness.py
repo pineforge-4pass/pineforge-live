@@ -265,3 +265,136 @@ def test_l1_harness_on_the_pooc_probe_has_no_missed_fill(test_so_pooc, test_feed
     for b in pooc_bars:
         assert [(a["kind"], a["reduce_only"], a["target_bar_index"]) for a in b["actions"]] == \
                [("MARKET_NOW", True, b["bar_index"])]
+
+
+def _harness_module():
+    """`scripts/l1_harness.py` imported as a module, for the pins that have
+    to patch `LiveCore` from the inside -- the subprocess runs above are
+    the contract (exit code, stdout, JSON), these are the paths a
+    subprocess cannot reach."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("l1_harness_under_test", HARNESS)
+    mod = importlib.util.module_from_spec(spec)
+    # registered before exec: the module defines dataclasses, whose field
+    # resolution looks the defining module up in `sys.modules`.
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_stop_raised_inside_evaluate_reaches_the_summary_and_the_exit(test_so, test_feed, tmp_path, monkeypatch):
+    """task-9 NEW-1: `evaluate()` raises its own STOPs -- a
+    `risk_violation` from the per-bar fill budget -- and journals its own
+    incidents. The harness read `stop`/`incidents` off `settle()`'s
+    `CoreOutput` only, so a STOP raised inside `evaluate()` was invisible
+    to `stops`, to `incidents` AND to the exit code, while the module
+    docstring, the README and docs/core.md all promise that a STOP
+    anywhere in the window exits non-zero.
+
+    Unreachable on the two clean corpus fixtures (2 fills a bar against a
+    budget of 8, no standing STOP), so it is forced here the way the
+    review reproduced it."""
+    from pineforge_live import types as T
+    from pineforge_live.core.live import LiveCore
+    mod = _harness_module()
+    real_evaluate = LiveCore.evaluate
+
+    def patched(self, forming, now_ms):
+        out = real_evaluate(self, forming, now_ms)
+        if out.probe.bar_index == 2011 and not out.incidents:
+            self._incident(out, "risk_violation", detail="max_fill_actions_per_bar", bar_index=2011)
+            self._raise(out, T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "max_fill_actions_per_bar")
+        return out
+
+    monkeypatch.setattr(LiveCore, "evaluate", patched)
+    args = mod.parse_args(["--so", str(test_so), "--feed", str(test_feed), "--start", "2010", "--bars", "4",
+                           "--journal", str(tmp_path / "j")])
+    (tmp_path / "j").mkdir()
+    report, code = mod.run(args)
+    assert code == 1
+    assert report["summary"]["stops"] == 1 and report["summary"]["incidents"] >= 1
+    stopped = [b for b in report["bars"] if b["stop"] is not None]
+    assert [b["stop"] for b in stopped] == [["FLAT_ONLY", "NONE", "max_fill_actions_per_bar"]]
+    assert "risk_violation" in stopped[0]["incidents"]
+
+
+def test_a_second_recompute_abort_ends_the_run_with_a_summary(test_so, test_feed, tmp_path, monkeypatch):
+    """A `RecomputeAborted` journals nothing and leaves the ledger
+    untouched, so the harness retries the bar once. When the retry aborts
+    too the ledger has NOT advanced, so the next bar is a `LedgerGap` --
+    which the harness deliberately does not catch (it means the caller
+    handed the core the wrong bar). The run therefore has to END here,
+    with a written report and a non-zero exit, instead of raising
+    `LedgerGap` out of the loop and printing a traceback where the summary
+    should be."""
+    from pineforge_live.core.live import CoreOutput, LiveCore
+    mod = _harness_module()
+
+    attempts = []
+
+    def always_aborts(self, bar, venue_fills, in_flight, mirrored, real_position, now_ms, **kw):
+        attempts.append(bar.ts_open)
+        out = CoreOutput()
+        self._incident(out, "recompute_aborted", ts_open=bar.ts_open)
+        return out
+
+    monkeypatch.setattr(LiveCore, "settle", always_aborts)
+    args = mod.parse_args(["--so", str(test_so), "--feed", str(test_feed), "--start", "2000", "--bars", "5",
+                           "--journal", str(tmp_path / "j")])
+    (tmp_path / "j").mkdir()
+    report, code = mod.run(args)
+    assert code == 1 and report["aborted_at"] == 2000
+    assert set(report["summary"]) == SUMMARY_KEYS
+    assert report["summary"]["bars"] == 1 and report["summary"]["g1_failures"] == 0
+    assert report["bars"][0]["incidents"] == ["recompute_aborted"]
+    assert report["bars"][0]["g1"] == "diverged:recompute_aborted"
+    assert len(attempts) == 2 and len(set(attempts)) == 1        # the bar was retried once, then the run ended
+
+
+def test_a_refused_seed_writes_the_report_and_exits_1(test_so, test_feed, tmp_path):
+    """A refused `seed()` is a RESULT, not a usage error: `LiveCore.seed`
+    returns the `STOP(HARD, HOLD)` it raised over a recompute that
+    disagrees with the journal (spec §4.1), and an operator needs that
+    written down. The harness used to `raise SystemExit(...)` -- a string
+    on stderr, no `--out` file, no summary line, on the one run whose
+    report is the whole point.
+
+    Forced through n7: settle a window into a journal, then corrupt an
+    IN-RANGE settlement row's hash. `Ledger.seed` now verifies every
+    journaled row inside the history's own length, so the seed itself
+    diverges."""
+    jdir = tmp_path / "j"
+    first = _run("--so", test_so, "--feed", test_feed, "--start", 2000, "--bars", 2, "--journal", jdir)
+    assert first.returncode == 0, first.stdout + first.stderr
+
+    from pineforge_live.journal import Journal
+    j = Journal.open(jdir / "j.sqlite3")
+    # the seed journals only its LAST bar's settlement, so 1999 is the row
+    # inside `bars[:2000]`'s own hash vector
+    j._exec("UPDATE settlements SET broker_state_hash=? WHERE bar_index=1999", (f"{7:016x}",))
+    j.close()
+
+    out = tmp_path / "refused.json"
+    p = _run("--so", test_so, "--feed", test_feed, "--start", 2000, "--bars", 2, "--journal", jdir, "--out", out)
+    assert p.returncode == 1, p.stdout + p.stderr
+    doc = json.loads(out.read_text())
+    assert doc["seed"]["stop"] == ["HARD", "HOLD", "seed:seed_hashes"]
+    assert doc["seed"]["incidents"] == ["ledger_divergence"]
+    assert doc["bars"] == [] and doc["summary"]["bars"] == 0 and doc["summary"]["stops"] == 1
+    assert set(doc["summary"]) == SUMMARY_KEYS
+    assert "l1: bars 0" in p.stdout and "seed STOP HARD/HOLD" in p.stdout
+
+
+def test_recompute_ms_is_measured_in_float_milliseconds(test_so, test_feed, tmp_path):
+    """Spec §2 sizes `grace` off `recompute_p99 + submit_p99`, and an
+    integer millisecond read floors a 900 us probe recompute to 0 -- a p99
+    of "0 ms" is a rounding artefact, not a latency budget."""
+    out = tmp_path / "l1.json"
+    p = _run("--so", test_so, "--feed", test_feed, "--start", 2000, "--bars", 5,
+             "--journal", tmp_path / "j", "--out", out)
+    assert p.returncode == 0, p.stdout + p.stderr
+    doc = json.loads(out.read_text())
+    samples = [ms for b in doc["bars"] for ms in b["probe_recompute_ms"]] + \
+              [b["settle_recompute_ms"] for b in doc["bars"] if b["settle_recompute_ms"] is not None]
+    assert samples and all(isinstance(x, float) for x in samples)
+    assert any(x != int(x) for x in samples), samples      # real sub-ms resolution, not floats holding integers

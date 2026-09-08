@@ -105,15 +105,17 @@ NON_FILL_ACTIONS = frozenset({"CANCEL_STALE_CYCLE"})
 FATAL_INCIDENTS = frozenset({"ledger_divergence", "bars_divergence"})
 
 
-def percentile(values: list[int], q: float) -> int:
+def percentile(values: list[float], q: float) -> float:
     """Nearest-rank percentile (no interpolation): the smallest sample at
     or above `q` of the way through the sorted values. Reported as-is in
     the summary because these numbers feed spec §2's `grace ≥
     recompute_p99 + submit_p99` -- rounding a latency budget DOWN by
     interpolating between two samples is the wrong direction to be wrong
-    in."""
+    in. Milliseconds are FLOATS (`Ledger._run`/`Probe.evaluate` measure to
+    1 us): a corpus recompute runs in single-digit ms and a probe run can
+    be sub-ms, so an integer read floors a real p99 to 0."""
     if not values:
-        return 0
+        return 0.0
     s = sorted(values)
     return s[min(len(s) - 1, max(0, math.ceil(q * len(s)) - 1))]
 
@@ -143,7 +145,17 @@ def supersede(actions: list) -> list:
     the engine's qty at the OPEN (`reason="open_requote"`). They are ONE
     order. A venue that filled both would double every entry and reversal
     -- and the resulting position, being neither side's, reconciles as
-    `unreconcilable_sides` -> `STOP(FLAT_ONLY)`."""
+    `unreconcilable_sides` -> `STOP(FLAT_ONLY)`.
+
+    The key's `intent` component is the Pine order id, which is `None` for
+    a `FLATTEN` (it has no single originating fill) and `"?"` for a
+    correction whose delta could not be attributed. Two such requests on
+    the SAME bar, same leg, same target bar would collapse onto one key
+    here -- which is the right reading for this harness (`reconcile` emits
+    at most one FLATTEN per decision, and a perfect venue never produces
+    the `"?"` case), and is stated rather than assumed because a real
+    executor keying orders this way needs to know it must fall back to its
+    own client id for those two."""
     by_key: dict[tuple, object] = {}
     for a in actions:
         by_key[(a.intent, "EXIT" if a.reduce_only else "ENTRY", a.target_bar_index)] = a
@@ -241,12 +253,73 @@ def run(args) -> tuple[dict, int]:
         journal.close()
 
 
+def _report(args, spec, bars_out, settle_ms, probe_ms_all, g1_failed, reference, aborted_at, seed_row) -> tuple[dict, int]:
+    """The report and the exit code, from whatever the run got to.
+
+    One builder for BOTH exits (the cadence's and a refused seed's), so
+    `summary`'s key set is the same document either way -- an operator (and
+    a test) reads the same fields off a run that never settled a bar as off
+    a clean 200-bar window."""
+    summary = {
+        "bars": len(bars_out),
+        "settle_fills": sum(len(b["settle_fills"]) for b in bars_out),
+        "probe_fills": sum(len(b["probe_fills"]) for b in bars_out),
+        "retracts": sum(len(b["retracts"]) for b in bars_out),
+        "probe_not_settled": sum(len(b["probe_not_settled"]) for b in bars_out),
+        "path_variant": sum(len(b["path_variant"]) for b in bars_out),
+        "superseded": sum(b["superseded"] for b in bars_out),
+        "stops": sum(1 for b in bars_out if b["stop"] is not None) + (1 if seed_row and seed_row["stop"] else 0),
+        "incidents": sum(len(b["incidents"]) for b in bars_out) + len((seed_row or {}).get("incidents", [])),
+        "non_confirmed": sum(len(b["non_confirmed"]) for b in bars_out),
+        "g1_failures": len(g1_failed),
+        "recompute_ms_p99_settle": percentile(settle_ms, 0.99),
+        "recompute_ms_p99_probe": percentile(probe_ms_all, 0.99),
+    }
+    report = {
+        "config": {"so": str(args.so), "feed": str(args.feed), "start": args.start, "bars": args.bars,
+                   "tf": spec.script_tf, "policy": args.policy, "seed": args.seed, "venue": spec.venue,
+                   "epoch_hash": spec.epoch_hash()},
+        "summary": summary,
+        "recompute_ms": {
+            "settle": {"n": len(settle_ms), "p50": percentile(settle_ms, 0.50),
+                       "p99": percentile(settle_ms, 0.99), "max": max(settle_ms, default=0.0)},
+            "probe": {"n": len(probe_ms_all), "p50": percentile(probe_ms_all, 0.50),
+                      "p99": percentile(probe_ms_all, 0.99), "max": max(probe_ms_all, default=0.0)},
+        },
+        "reference_run": reference,
+        "aborted_at": aborted_at,
+        "seed": seed_row,
+        "bars": bars_out,
+    }
+    # A STOP mid-window refuses actions and changes the very stream the two
+    # assertions are about, so it can never be a passing run (m1).
+    failed = (summary["g1_failures"] or summary["probe_not_settled"] or summary["stops"]
+              or aborted_at is not None)
+    return report, (1 if failed else 0)
+
+
+def stop_json(stop) -> list | None:
+    """A `CoreOutput.stop` as JSON: `types.StopLevel`/`StopDisposition` are
+    plain `enum.Enum` (no `str` mixin), so the members themselves raise
+    `TypeError` in `json.dumps` -- on precisely the runs whose report
+    matters most."""
+    return [stop[0].value, stop[1].value, stop[2]] if stop else None
+
+
 def _cadence(args, spec, handle, journal, marker, feed) -> tuple[dict, int]:
     core = LiveCore(handle, spec, journal, marker, RUNTIME_CONFIG, LIMITS, DEAD_BAND, BREAKERS)
 
+    empty_reference = {"bars_checked": 0, "hash_mismatches": [], "prefix_mismatches": []}
     seeded = core.seed(feed[:args.start])
+    seed_row = {"stop": stop_json(seeded.stop), "incidents": [x["kind"] for x in seeded.incidents]}
     if seeded.settle is None:
-        raise SystemExit(f"seed failed: {seeded.incidents}")
+        # A refused seed is a RESULT, not a usage error: `seed()` returns
+        # the STOP it raised (a divergent recompute against the journal,
+        # spec §4.1) and an operator needs that written down. Raising
+        # SystemExit here printed a string and wrote no `--out` at all --
+        # no summary line, no JSON, on the one run whose report is the
+        # whole point.
+        return _report(args, spec, [], [], [], set(), empty_reference, None, seed_row)
     # The venue starts holding what the seed adopted -- an always-in-market
     # corpus script is never flat, and an account that disagreed with the
     # ledger at bar 0 would be an `account_mismatch` STOP on bar 1 that has
@@ -264,12 +337,24 @@ def _cadence(args, spec, handle, journal, marker, feed) -> tuple[dict, int]:
             builder = FormingBarBuilder(spec.script_tf)
             results, bar_probe_ms = [], []
             pending = list(owed)
+            # NEW-1: `evaluate()` raises its own STOPs (a `risk_violation`
+            # from the per-bar fill budget) and journals its own incidents
+            # (`action_refused_by_stop`, `risk_refused`,
+            # `ambiguous_trigger_intent`). Reading only `settle()`'s
+            # `CoreOutput` made every one of them invisible to `stops`,
+            # `incidents` AND the exit code -- while the module docstring,
+            # the README and docs/core.md all say a STOP anywhere in the
+            # window exits non-zero. `probe_retract` is excluded: it has
+            # its own `retracts` tally and is explicitly never a STOP.
+            ev_stop, ev_incidents = None, []
             for tick in ticks_for(runner, bar, spec.script_tf, args.policy, args.seed, spec.instrument):
                 builder.push(tick)
                 ev = core.evaluate(builder.forming(), now_ms=tick.ts)
                 bar_probe_ms.append(ev.probe.recompute_ms)
                 results.append(ev.probe)
                 pending += ev.actions
+                ev_stop = ev_stop or ev.stop
+                ev_incidents += [x["kind"] for x in ev.incidents if x["kind"] != "probe_retract"]
             probe = fold_probe(results)
 
             # M1: one order per supersede key reaches the venue.
@@ -292,6 +377,8 @@ def _cadence(args, spec, handle, journal, marker, feed) -> tuple[dict, int]:
             # A `LedgerGap` is NOT caught: it means the harness handed the
             # core the wrong bar (spec §2's carry-forward is the bar
             # layer's job), i.e. a harness bug, and it must be loud.
+            row["incidents"] = list(ev_incidents)
+            row["stop"] = stop_json(ev_stop)
             try:
                 out = _settle_with_one_retry(core, bar, venue, real_position, spec)
             except (LedgerDivergence, BarsDivergence) as e:
@@ -301,23 +388,25 @@ def _cadence(args, spec, handle, journal, marker, feed) -> tuple[dict, int]:
                 aborted_at = i
                 break
 
-            row["incidents"] = [x["kind"] for x in out.incidents]
-            row["stop"] = [out.stop[0].value, out.stop[1].value, out.stop[2]] if out.stop else None
+            row["incidents"] = ev_incidents + [x["kind"] for x in out.incidents]
+            row["stop"] = stop_json(ev_stop or out.stop)
             row["non_confirmed"] = sorted(c.cls.value for c in out.classified if c.cls is not FillClass.CONFIRMED)
             if out.settle is None:
                 # LiveCore swallows a divergence into a STOP + incident
                 # rather than raising; same conclusion as the except branch.
-                # A `recompute_aborted` that survived the retry is counted
-                # and the run continues (nothing was journaled and the
-                # ledger is untouched, so it is not a divergence) -- the
-                # next bar's `LedgerGap` will then say so out loud.
                 row["g1"] = "diverged:" + ",".join(row["incidents"])
-                g1_failed.add(i)
-                bars_out.append(row)
                 if FATAL_INCIDENTS & set(row["incidents"]):
-                    aborted_at = i
-                    break
-                continue
+                    g1_failed.add(i)
+                bars_out.append(row)
+                # Either way the ledger did NOT advance, so every later bar
+                # is a `LedgerGap` by construction. A divergence is a G1
+                # failure; a `recompute_aborted` that survived its retry is
+                # not -- but both END the run, with a written report and a
+                # non-zero exit, rather than raising `LedgerGap` out of the
+                # loop on the next bar and printing a traceback instead of
+                # a summary.
+                aborted_at = i
+                break
 
             s = out.settle
             settled_indices.append(s.bar_index)
@@ -362,41 +451,7 @@ def _cadence(args, spec, handle, journal, marker, feed) -> tuple[dict, int]:
                 reference["prefix_mismatches"].append(m)
                 g1_failed.add(m)
 
-    summary = {
-        "bars": len(bars_out),
-        "settle_fills": sum(len(b["settle_fills"]) for b in bars_out),
-        "probe_fills": sum(len(b["probe_fills"]) for b in bars_out),
-        "retracts": sum(len(b["retracts"]) for b in bars_out),
-        "probe_not_settled": sum(len(b["probe_not_settled"]) for b in bars_out),
-        "path_variant": sum(len(b["path_variant"]) for b in bars_out),
-        "superseded": sum(b["superseded"] for b in bars_out),
-        "stops": sum(1 for b in bars_out if b["stop"] is not None),
-        "incidents": sum(len(b["incidents"]) for b in bars_out),
-        "non_confirmed": sum(len(b["non_confirmed"]) for b in bars_out),
-        "g1_failures": len(g1_failed),
-        "recompute_ms_p99_settle": percentile(settle_ms, 0.99),
-        "recompute_ms_p99_probe": percentile(probe_ms_all, 0.99),
-    }
-    report = {
-        "config": {"so": str(args.so), "feed": str(args.feed), "start": args.start, "bars": args.bars,
-                   "tf": spec.script_tf, "policy": args.policy, "seed": args.seed, "venue": spec.venue,
-                   "epoch_hash": spec.epoch_hash()},
-        "summary": summary,
-        "recompute_ms": {
-            "settle": {"n": len(settle_ms), "p50": percentile(settle_ms, 0.50),
-                       "p99": percentile(settle_ms, 0.99), "max": max(settle_ms, default=0)},
-            "probe": {"n": len(probe_ms_all), "p50": percentile(probe_ms_all, 0.50),
-                      "p99": percentile(probe_ms_all, 0.99), "max": max(probe_ms_all, default=0)},
-        },
-        "reference_run": reference,
-        "aborted_at": aborted_at,
-        "bars": bars_out,
-    }
-    # A STOP mid-window refuses actions and changes the very stream the two
-    # assertions are about, so it can never be a passing run (m1).
-    failed = (summary["g1_failures"] or summary["probe_not_settled"] or summary["stops"]
-              or aborted_at is not None)
-    return report, (1 if failed else 0)
+    return _report(args, spec, bars_out, settle_ms, probe_ms_all, g1_failed, reference, aborted_at, seed_row)
 
 
 def _settle_with_one_retry(core: LiveCore, bar, venue, real_position, spec):
@@ -450,6 +505,11 @@ def main(argv=None) -> int:
         args.out.write_text(json.dumps(report, indent=2, sort_keys=False) + "\n")
     s = report["summary"]
     print("l1: " + " ".join(f"{k} {v}" for k, v in s.items()))
+    seed_row = report.get("seed") or {}
+    if seed_row.get("stop"):
+        print("l1: seed STOP {0}/{1}: {2}".format(*seed_row["stop"]))
+    if not report["bars"] and seed_row.get("incidents"):
+        print(f"l1: seed incidents: {', '.join(seed_row['incidents'])}")
     print("l1: recompute_ms settle p50 {p50} p99 {p99} max {max} (n {n})".format(**report["recompute_ms"]["settle"]))
     print("l1: recompute_ms probe  p50 {p50} p99 {p99} max {max} (n {n})".format(**report["recompute_ms"]["probe"]))
     if report["aborted_at"] is not None:

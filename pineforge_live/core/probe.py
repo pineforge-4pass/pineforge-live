@@ -82,7 +82,7 @@ class ProbeResult:
     fill -- `LiveCore`'s withdraw of an unconfirmed advance (m5) -- has to
     tell the two apart or it cancels live orders on an engine hiccup."""
     bar_index: int; forming: T.NormalizedBar; fills: list[ProbeFill]; deferred: list[ProbeFill]; retracted: list[ProbeFill]
-    levels: dict[str, tuple[float | None, float | None, float | None]]; guard_active: bool; recompute_ms: int; p_other_ran: bool
+    levels: dict[str, tuple[float | None, float | None, float | None]]; guard_active: bool; recompute_ms: float; p_other_ran: bool
     dropped: list[ProbeFill] = dataclasses.field(default_factory=list)
     aborted: bool = False
 
@@ -263,7 +263,7 @@ class Probe:
         for k in [k for k in self.retracted_history if k < n]:
             del self.retracted_history[k]
 
-    def _journal(self, journal, forming: T.NormalizedBar, now_ms: int, outcome: str, ms: int) -> None:
+    def _journal(self, journal, forming: T.NormalizedBar, now_ms: int, outcome: str, ms: float) -> None:
         if journal is not None:
             journal.append_evaluation({"epoch_hash": self.spec.epoch_hash(), "trigger": "evaluate", "tick_seq_from": None, "tick_seq_to": None,
                                        "forming_json": json.dumps(forming.ohlcv()), "outcome": outcome, "recompute_ms": ms,
@@ -329,7 +329,7 @@ class Probe:
 
         p_auto = self._run(bars, PATH_ORDER_AUTO)
         if p_auto.status != 0:
-            ms = int((time.perf_counter() - t0) * 1000)
+            ms = round((time.perf_counter() - t0) * 1000, 3)
             self._journal(journal, forming, now_ms, "aborted", ms)
             return ProbeResult(n, forming, [], [], [], {}, guard, ms, False, [], aborted=True)
 
@@ -364,7 +364,7 @@ class Probe:
                 # with everything" -- journal it and return an empty result
                 # (as the P_auto abort path does above), never emit on a
                 # half-run, and never touch prev_fills/retracted_history.
-                ms = int((time.perf_counter() - t0) * 1000)
+                ms = round((time.perf_counter() - t0) * 1000, 3)
                 self._journal(journal, forming, now_ms, "aborted", ms)
                 # N4 (re-review): still report P_auto's own drops on an
                 # abort -- they were already computed above and the caller
@@ -413,6 +413,6 @@ class Probe:
         else:
             for k, it in book.items():
                 levels[k] = (it.stop, it.limit, it.activation)
-        ms = int((time.perf_counter() - t0) * 1000)
+        ms = round((time.perf_counter() - t0) * 1000, 3)
         self._journal(journal, forming, now_ms, "ran", ms)
         return ProbeResult(n, forming, fills, deferred, retracted, levels, guard, ms, other_ran, dropped)

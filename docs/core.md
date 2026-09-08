@@ -22,10 +22,17 @@ drift from the backtest, because there is no second implementation at all.
 
 **G1 — prefix stability.** For all `m < n`: the trades of `ledger(n)` with
 `exit_bar ≤ m` equal `ledger(m)`'s trades, and `broker_state_hash[m]` recorded
-during `ledger(n)`'s run equals the hash journaled at settlement `m`. Checked
-at *every* settlement against the journal, not sampled. A failure is
-`STOP(HARD, HOLD)`: the recompute disagrees with a durable record, which is
+during `ledger(n)`'s run equals the hash journaled at settlement `m`. A failure
+is `STOP(HARD, HOLD)`: the recompute disagrees with a durable record, which is
 never something a runtime may trade through.
+
+What is checked when: every settlement re-checks the *previous bar's* hash and
+digests against the journal, and the full trade prefix ending there — the whole
+vector then follows by induction for a chain this process settled itself.
+`seed()` is where that induction has to be re-established, because a restart
+inherits a journal it did not write in this incarnation: it verifies **every**
+journaled settlement row inside the seeded history's own length against the
+recomputed hash vector.
 
 ## Cadence
 
@@ -51,7 +58,7 @@ TRIGGER per intent per cycle; `max_fill_actions_per_bar` ≤ P's fill count".
 | `core/reconcile.py` | `reconcile()` — a pure decision: classified fills in, `CorrectionRequest`s + a possible STOP out. Never submits anything. |
 | `core/riskguard.py` | `RiskLimits`/`RiskGuard` budgets, the `StopController` (levels, durability, restore, clear), G3 `Breaker`s and their `RateWindow`s. |
 | `core/ids.py` | Trade/intent identity: `TradeKey`, `keys_sha256`, the header-derived order-type names. |
-| `core/live.py` | `LiveCore` — the facade that composes all of the above into `seed`/`settle`/`evaluate`, and the only place that journals. |
+| `core/live.py` | `LiveCore` — the facade that composes all of the above into `seed`/`settle`/`evaluate`, and the only place that journals: `epochs`/`runtime_configs` at construction, `incidents`, `reconciles`, and the settled book's own transitions to `intents` (spec §6 — B3 reads them to re-run a journaled STOP's cancel step on restart without recomputing the ledger first). `bars`/`settlements` are the ledger's, `evaluations` the probe's, `stops` the STOP controller's. |
 
 ## `settle(bar, venue_fills, in_flight, mirrored, real_position, now_ms)`
 
@@ -72,15 +79,35 @@ Spec §4 settle 1–8, in this order — and the order is load-bearing:
    STOP gate and the RiskGuard budgets. Building actions *after* the
    escalation is what stops a settlement from shipping an exposure-increasing
    order it has already decided to STOP over.
-7. **Journal** the reconcile row (the settlement row is the ledger's own,
-   written atomically and idempotently per `(epoch, bar_index)`).
+7. **Journal** the reconcile row and the settled book's intent transitions
+   (the settlement row is the ledger's own, idempotent per
+   `(epoch, bar_index)`). "Atomic" it is not: the bar row and the settlement
+   row are two inserts, which is exactly why `seed()` pre-checks for a
+   conflicting settlement row before writing either.
+
+**An idempotent re-delivery settles nothing twice.** `Ledger.settle` returns the
+last settlement unchanged when handed a byte-identical re-delivery of the bar it
+already settled (spec §4.8 — check mode's REST catch-up produces one routinely),
+and `LiveCore` returns immediately on that: no classification, no reconcile, no
+actions, no journal row, and `pending_market` untouched. Re-running the
+settlement would emulate the bar's fills a second time against a venue that has
+already reported them, classify them `MISSED`, and issue a duplicate correction.
 
 `real_position` is the venue account's own reported position — spec §5.4's
 *secondary* check. The *primary* basis is `our_signed_fills`: the cumulative
 signed qty of the `OURS` fills we were handed, which `LiveCore` derives itself
-(anchored at `seed()` on the position the seed adopted, reset when a
-settlement leaves the ledger flat) unless the caller passes an
-exchange-derived value for that one call.
+unless the caller passes an exchange-derived value for that one call. It is
+anchored at `seed()` — on the venue's own position when `seed(real_position=…)`
+is given, else on the position the recompute adopted — and reset only when a
+settlement leaves the ledger flat **and the venue's own report agrees it is
+flat**. Both halves matter: resetting on a flat ledger alone reads the next
+bar's repair fill as a position out of nowhere, and judging "the venue is flat"
+from our own accumulator instead of `real_position` leaves it stuck after a
+liquidation flattens the venue behind us.
+
+A cold start is refused when they disagree: `seed(real_position=…)` beyond the
+dead band from the recompute is `STOP(HARD, HOLD, "cold_start_position")` and no
+seed, unless the operator passes `adopt_position` (spec §6).
 
 ## `evaluate(forming, now_ms)`
 
@@ -102,12 +129,16 @@ Spec §4 evaluate 1–4:
    evaluate does not TRIGGER them a second time: it **supersedes** them,
    re-emitting the same `(intent, leg, target_bar_index)` as a
    `MARKET_AT_OPEN` carrying the engine's own qty *at the open*
-   (`reason="open_requote"`), which is the qty the spec actually specifies and
-   which B3 cannot re-derive afterwards (the handle's accessors describe its
-   LAST run). The settle-time request is the advance notice that lets B3 have
-   an order in place at the open; the re-quote fixes its size. A
-   `(intent, leg)` is otherwise TRIGGERed at most once per bar however many
-   ticks arrive.
+   (`reason="open_requote"`) — but only when the two qtys differ by more than
+   the dead band, since otherwise there is nothing to fix. The settle-time
+   request is advance *notice* that lets B3 have an order in place at the open;
+   this evaluate settles its fate three ways: re-quote (a real size
+   difference), nothing (the sizes agree), or **withdraw** — a `qty=0`
+   supersede for a key the open did not confirm at all, because the engine's
+   admission gate refused it and the ledger will never book a fill for it. A
+   re-quote and a withdraw do not spend `max_fill_actions_per_bar`: they amend
+   an order the settlement already counted and placed. A `(intent, leg)` is
+   otherwise TRIGGERed at most once per bar however many ticks arrive.
 
 ## Fill classes and the reconcile table
 
@@ -121,12 +152,13 @@ about it (spec §5.4). Corrections are bounded by `ReconcileConfig`
 |---|---|---|
 | `CONFIRMED` | emulated fill has its venue counterpart | nothing |
 | `IN_FLIGHT` | the intent has a non-terminal action | deferred; never corrected, never `MISSED` |
-| `MISSED` | emulated, no venue fill, nothing in flight | one correcting MARKET within age/distance/budget bounds; otherwise the cycle is journaled `SKIPPED` |
+| `MISSED` | emulated, no venue fill, nothing in flight, and the order *had* been resting | one correcting MARKET within age/distance/budget bounds; otherwise the cycle is journaled `SKIPPED` |
+| `SETTLE_ONLY` | emulated fill of an order that never rested in the previous book — a `process_orders_on_close` fill | not the reconciler's: `LiveCore` places a `MARKET_NOW` (spec §4 settle 6) and the venue reports it at `n+1` |
 | `SYNTHETIC` | engine-forced close (`MARGIN_CALL`, `INTRADAY_*`) | reduce-only MARKET now; never looks for a venue counterpart |
 | `QTY_DIVERGENT` | same intent, qty differs beyond the dead-band | reduce-only trim (excess) / budgeted top-up (shortfall) / carry as residual |
-| `PATH_DIVERGENT` | venue and ledger closed the same cycle via different legs, net equal | continue; counterfactual journaled; G3 input |
+| `PATH_DIVERGENT` | venue and ledger closed the same cycle via different legs, net equal — decided by *pairability*: an unmatched emulated exit with the same close direction and qty must exist | continue; counterfactual journaled; G3 input |
 | `MIRROR_EARLY` | venue filled a mirrored level the ledger did not fill this bar | hold flat, retain the intent; per-day cap → `STOP(FLAT_ONLY)` |
-| `TRIGGER_REVERSED` / `ENTRY_SLIP` | our executed TRIGGER against a flat/opposite ledger; entry beyond the slip budget | reduce-only flatten, then `STOP(FLAT_ONLY)` |
+| `TRIGGER_REVERSED` / `ENTRY_SLIP` | our executed TRIGGER against a flat/opposite ledger; a matched ENTRY pair whose `\|venue − emulated\| / emulated × 1e4` exceeds `ReconcileConfig.max_entry_slip_bps` (per pair, not per bar) | reduce-only flatten, then `STOP(FLAT_ONLY)` |
 | `RETRACTED` | one of OUR fills the ledger never emulated (a TRIGGER the settled recompute no longer produces) | `STOP(FLAT_ONLY)` (auto-correction is opt-in) |
 | `UNATTRIBUTED_VENUE` | a **venue-initiated** fill — liquidation, ADL, a manual trade: not ours at all | `STOP(HARD, FLATTEN)` |
 
@@ -134,6 +166,32 @@ Above the table: if the account position disagrees with our own fill basis by
 more than the dead-band, the reconciler cannot trust its own fill tracking on
 that call — it escalates `STOP(FLAT_ONLY)` (`account_mismatch`) and skips
 every `MISSED`/`QTY_DIVERGENT` correction.
+
+Four bounds sit around the table, and all four bind:
+
+- **`[r4]` age/distance.** A `MISSED` correction is bounded by
+  `max_missed_age_bars` and `max_missed_entry_distance_bps`. For the age to
+  mean anything the same `(intent, leg)` has to be able to read `MISSED` on two
+  consecutive settlements, so a `MISSED` the decision declined to act on *for a
+  reason that can change* — the settle was not quiescent, or its own STOP level
+  or the budget refused the correction — is re-presented at the next
+  settlement rather than dropped.
+- **`disagree_twice`.** Consecutive settlements skipped as not quiescent
+  (spec §5.4's "skip (bounded) and count toward `disagree_twice`") escalate
+  `STOP(FLAT_ONLY)` at the limit: a driver whose actions never go terminal
+  otherwise reconciles nothing, bar after bar, with only a counter to show.
+- **`max_daily_reconciles`.** The `CORRECTION`/`FLATTEN` actions a settlement
+  emits are tallied per UTC day and refused past the cap (incident +
+  `cycle_skipped`) — the low-n guard on corrections, because the G3 rate
+  breakers are alert-only below their own `n_min` (381 samples at θ = 1%).
+- **`horizon_bars`.** Checked before each recompute: an alert incident once at
+  80% consumption, and at 100% `STOP(FLAT_ONLY, "horizon")` with the settle
+  **refused** — spec §2's "forces an epoch rotation before the next
+  settlement". The rotation itself is an operator ceremony (spec §6).
+
+The mirror-early and daily-reconcile tallies are re-derived from the day's own
+journaled `reconciles` rows at construction, so neither cap can be laundered by
+restarting the process.
 
 **The account contract is strict.** `real_position` must be the venue's own
 snapshot *event-time after the last fill in `venue_fills`* — spec §5.4's
@@ -167,6 +225,13 @@ Two axes (`types.StopLevel` × `types.StopDisposition`):
   which is what starts the `hard_stop_max_hold_ms` clock `hold_expired()`
   measures.
 
+The `HARD_FLAT` is the one order the reconciler does not produce: it is not a
+correction toward the ledger but the STOP's own disposition acting on venue
+truth, so `settle()` emits it from the STOP state — once, journaled as an
+incident, and only while `real_position` is non-zero, so a restart re-issues it
+only if the venue still holds a position. The dead-man, the re-established
+static exits and `hold_expired()`'s escalation are B3's.
+
 Rules that hold everywhere:
 
 - **Monotonic.** `raise_stop` only ever escalates, ranked by
@@ -188,9 +253,12 @@ Rules that hold everywhere:
   what an operator must be able to find afterwards.
 
 G3 breakers (spec §1) are self-tested at construction — a breaker that could
-never fire (`UB_95(0, n_min) ≥ θ`, or a window smaller than its own `n_min`)
-is a startup error, not a silent no-op — and sampled once per settlement:
-`breached()` escalates `STOP(FLAT_ONLY)`, `alert()` journals.
+never fire is a startup error, not a silent no-op — and sampled once per
+settlement: `breached()` escalates `STOP(FLAT_ONLY)`, `alert()` journals. "Could
+never fire" is three things: `UB_95(0, n_min) ≥ θ`, a window smaller than its own
+`n_min`, and a `name` outside `reconcile.COUNTER_NAMES` — a breaker's name *is*
+the reconciler counter it watches, so one naming something nothing bumps
+observes `False` for ever.
 
 ## The B3 handoff
 
@@ -203,10 +271,11 @@ target_bar_index)`.
 |---|---|---|
 | `TRIGGER` | `evaluate` | an intrabar fill both paths confirmed; `price_hint` is the probe's own fill price |
 | `MARKET_AT_OPEN` | `settle` **and** `evaluate` | a MARKET resting in the settled book, filling at bar `n+1`'s open. `price_hint` is `None` — the open *is* the price (no fallback; B3 waits `open_wait_ms` for it). An order that reverses a live position is TWO legs: a reduce-only close, then the engine's own opened qty. `settle(n)` emits it as advance notice; the first `evaluate()` of bar `n+1` emits it again with `reason="open_requote"` and the engine's open-priced qty — a **supersede**, not a second order (see below) |
-| `SYNTHETIC_CLOSE` | `settle` | an engine-forced close (margin call / intraday cap), reduce-only |
+| `MARKET_NOW` | `settle` | a `process_orders_on_close` fill (`SETTLE_ONLY`): the order never rested, so there is no leg to ask for at the next open — the venue is taken to the ledger's position *now*, at this bar's close. `target_bar_index` is `n` |
+| `SYNTHETIC_CLOSE` | `settle` | an engine-forced close (margin call / intraday cap), reduce-only. `intent` is the closed trade's exit id, or `__synthetic__` when the engine booked none (a margin call does) |
 | `CORRECTION` | `settle` | a reconciler `MARKET_CORRECT` / `REDUCE_ONLY_TRIM` / `TOP_UP`; `cls` names which |
 | `FLATTEN` | `settle` | reduce real exposure to zero (`TRIGGER_REVERSED`, `ENTRY_SLIP`) |
-| `CANCEL_STALE_CYCLE` | `settle` | an intent that left the settled book **unfilled**; `book_diff` reads `CANCELLED` for a filled order too, so the bar's own emulated fills disambiguate and a filled order is never chased. `qty` is 0 — a book op, not a fill |
+| `CANCEL_STALE_CYCLE` | `settle` **and** `evaluate` | an intent that left the settled book **unfilled**; `book_diff` reads `CANCELLED` for a filled order too, so the bar's own *venue* fills disambiguate — a mirrored exit the ledger filled and the venue did not is still resting there and must be chased. From `evaluate` it withdraws a settled advance whose re-quote the STOP/RiskGuard refused. `qty` is 0 — a book op, not a fill |
 
 `intent` is always the **Pine order id**, never an `IntentKey.s`: that is the
 identity a venue fill is matched back against, so the request → fill →
@@ -231,8 +300,63 @@ report their fills during bar `n+1`, where `classify_bar`'s identity match
 the core is called *with* the fills and cannot know when they were reported.
 B3 must define the submit-now / match-at-`n+1` rule explicitly — either by
 carrying the origin bar alongside the matching bar, or by holding such fills
-for the settlement that owns them — and until it does, a driver echoing them
-back at `n+1` sees `UNATTRIBUTED_VENUE`.
+for the settlement that owns them. Until it does, such an echo is not
+identity-matched at all: with `cause=OURS` it falls through the unmatched-venue
+branch and reads `CONFIRMED` ("no counterpart, within the dead-band") when the
+correction did its job, and `RETRACTED` → `STOP(FLAT_ONLY)` when it did not.
+Neither is the `CONFIRMED`-by-identity B3 needs to prove a correction
+round-tripped, and the first is worse than an error: a correction that worked is
+silently absorbed. `MARKET_NOW` is on the same footing (`target_bar_index = n`
+by construction).
+
+### B3 inputs
+
+Things the core has established that B3 has to honour or supply. They are not
+defects — the core cannot decide them alone — but each one is a way B3 can be
+wrong that nothing here will catch:
+
+1. **`in_flight` is PENDING/PARTIAL only.** Resting ACKED conditionals belong in
+   `mirrored`. Quiescence is `not in_flight`, so a driver that puts ACKED mirror
+   orders in `in_flight` never reconciles a mirrored bar at all — and now
+   escalates `disagree_twice` for it.
+2. **The settle-time `MARKET_AT_OPEN` is notice, not an order.** Submit the
+   re-quote, or the advance once the open is known and no re-quote/withdraw
+   arrived. A `qty=0` supersede means *do not place it*.
+3. **`VenueFill.leg` is `"EXIT"` iff `reduce_only`.** Build `VenueFill`s from
+   fills with exactly that rule or the classifier's match key never matches.
+4. **Match time for settle-emitted actions.** `CORRECTION`, `FLATTEN`,
+   `SYNTHETIC_CLOSE` and `MARKET_NOW` all carry `target_bar_index = n` for a bar
+   that is already closed — see the open question above. B3 owns the submit-now
+   / match-at-`n+1` rule, and `MARKET_NOW` in particular *depends* on it: the
+   `SETTLE_ONLY` fill is in flight for its own settlement and is confirmed at
+   `n+1`.
+5. **`hold_expired()` escalation.** The core answers "has the HARD/HOLD bound
+   elapsed"; acting on it (flatten) is B3's sequencing, and belongs with the
+   `HARD_FLAT` the core does emit.
+6. **Breaker names are config.** A G3 breaker's `name` is the reconciler counter
+   it watches; `BreakerTable.self_test` refuses one outside
+   `reconcile.COUNTER_NAMES` at construction.
+7. **Restart-time classify/reconcile** (m10, NOT implemented here). A crash
+   between the ledger's settlement row and `settle()`'s reconcile step loses
+   that bar's classification for good: on restart `seed()` recomputes the same
+   bar, never classifies its fills, and `settle(n+1)` sees the bar-n venue fills
+   as unmatched (`CONFIRMED`-with-note if the positions agree, else `RETRACTED`
+   → STOP). Spec §6's restart flow ends "… adopt in-flight → reconcile →
+   resume", so B3 needs an entry point that re-runs classify+reconcile over the
+   seed bar's own fills. The core's half is there — `seed()` takes
+   `real_position`, and `emulated_from_settle(s, {}, s.book)` reconstructs the
+   bar's fills — but `entry_fills` need the PREVIOUS settlement's position,
+   which is in the journaled settlement row, and a deterministic re-derivation
+   of `prev_book` that this core does not persist.
+8. **`ProbeResult.levels` has no `level_resolved`** (n6, NOT implemented here).
+   Spec evaluate 3 refreshes it intrabar — "an offset bracket becomes mirrorable
+   at the first evaluate after the entry fill" — but `levels` carries only
+   `(stop, limit, activation)`. B3's mirror sync has to read `level_resolved`
+   from `SettleResult.book`, which means it sees the transition one settlement
+   late.
+9. **B3's desired-set mirror sync** is the real guarantee that a `MISSED`
+   mirrored exit's resting venue order is cancelled; the core's own
+   `CANCEL_STALE_CYCLE` covers the book departure it can see.
 
 What B3 owns and the core deliberately does not: client ids and `action_seq`,
 the order state machine and adoption, mirror sync (`level_version`, dead-band,
@@ -261,7 +385,12 @@ perfect venue and reports the two L1 assertions (spec §10.2):
 
 Its perfect venue honours the supersede contract and the strict account
 contract above, so those are exercised rather than assumed. A STOP anywhere in
-the window, any incident, or any non-`CONFIRMED` classification is reported per
-bar and in the summary, and a STOP exits non-zero: a STOP mid-window refuses
-actions and silently changes the very stream the two assertions are about. See
-the README for the command and the current numbers.
+the window — raised by `settle()` **or** by `evaluate()` — any incident, or any
+non-`CONFIRMED` classification is reported per bar and in the summary, and a
+STOP exits non-zero: a STOP mid-window refuses actions and silently changes the
+very stream the two assertions are about. A refused `seed()` is reported the
+same way (`report["seed"]`, exit 1) rather than dying with a message, and a
+recompute that aborts twice ends the run with a written summary instead of a
+traceback on the next bar's `LedgerGap`. Recompute times are float milliseconds:
+a probe run can be sub-millisecond, and spec §2 sizes `grace` off their p99.
+See the README for the commands and the current numbers.
