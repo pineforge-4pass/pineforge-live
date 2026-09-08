@@ -1,4 +1,5 @@
 import dataclasses
+import pytest
 from pineforge_live import types as T
 from pineforge_live.epoch import CodeIdentity, RuntimeConfig, EpochSpec, apply_epoch
 
@@ -35,3 +36,35 @@ def test_apply_epoch_replays_exact_setter_sequence(test_so):
         log = apply_epoch(h, s)
     assert log == s.setter_sequence()
     assert log[0][0] == "set_chart_timezone" and ("set_override", ("slippage", "1")) in log
+
+class _FakeHandle:
+    """Tiny stand-in for EngineHandle: setter methods are no-ops that log their
+    call, except set_syminfo_string for one chosen key, which reports rejection
+    (rc=1) the way the real engine ABI does."""
+    def __init__(self, reject_key: str):
+        self.setter_log: list[tuple[str, tuple]] = []
+        self._reject_key = reject_key
+    def _log(self, name, *args):
+        self.setter_log.append((name, args))
+    def set_chart_timezone(self, tz): self._log("set_chart_timezone", tz)
+    def set_syminfo_timezone(self, tz): self._log("set_syminfo_timezone", tz)
+    def set_syminfo_session(self, session): self._log("set_syminfo_session", session)
+    def set_syminfo_type(self, t): self._log("set_syminfo_type", t)
+    def set_syminfo_string(self, key, value):
+        self._log("set_syminfo_string", key, value)
+        return 1 if key == self._reject_key else 0
+    def set_syminfo_mintick(self, v): self._log("set_syminfo_mintick", v)
+    def set_syminfo_pointvalue(self, v): self._log("set_syminfo_pointvalue", v)
+    def set_syminfo_metadata(self, key, v): self._log("set_syminfo_metadata", key, v)
+    def set_input(self, key, value): self._log("set_input", key, value)
+    def set_override(self, key, value): self._log("set_override", key, value)
+    def set_trade_start_time(self, ms): self._log("set_trade_start_time", ms)
+
+def test_apply_epoch_raises_on_rejected_syminfo_string():
+    h = _FakeHandle(reject_key="currency")
+    with pytest.raises(RuntimeError, match=r"currency.*rc=1"):
+        apply_epoch(h, spec())
+    # Fails fast: the rejected setter is the last thing logged, none of the
+    # setters that would follow it in the sequence ran.
+    assert h.setter_log[-1] == ("set_syminfo_string", ("currency", "USDT"))
+    assert not any(name == "set_input" for name, _ in h.setter_log)

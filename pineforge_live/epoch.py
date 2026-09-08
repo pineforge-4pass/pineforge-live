@@ -55,7 +55,12 @@ class EpochSpec:
 def apply_epoch(handle, spec: EpochSpec) -> list[tuple[str, tuple]]:
     handle.setter_log.clear()
     for name, args in spec.setter_sequence():
-        getattr(handle, name)(*args)
+        rc = getattr(handle, name)(*args)
+        if name == "set_syminfo_string" and rc:
+            # Configuration-time failure: fail fast rather than deferring to
+            # the next run, where a silently-unset syminfo string would show
+            # up only as a downstream parity mismatch.
+            raise RuntimeError(f"engine rejected syminfo string {args[0]!r} (rc={rc})")
     if handle.setter_log != spec.setter_sequence():
         raise RuntimeError("engine setter log diverged from the epoch's setter sequence")
     return list(handle.setter_log)
