@@ -188,3 +188,22 @@ def test_escalate_keeps_first_cause_on_equal_level_and_disposition():
     d = R.reconcile(inp([cf(C.FillClass.RETRACTED), cf(C.FillClass.TRIGGER_REVERSED)], real_position=0.0, ledger_position=0.0))
     assert d.stop[0] == T.StopLevel.FLAT_ONLY
     assert d.stop[2] == "RETRACTED: real ≠ ledger beyond dead-band"
+
+def test_escalation_uses_the_shared_riskguard_rank_table():
+    """Prelim (Task 8): `_escalate` no longer carries its own copy of
+    §5.5's (level, disposition) lattice -- it calls the single exported
+    `riskguard.stronger()`, so the reconciler and `StopController` can
+    never drift apart on which of two STOPs wins."""
+    from pineforge_live.core.riskguard import stronger
+    assert R.stronger is stronger
+    assert not hasattr(R, "_STOP_RANK") and not hasattr(R, "_DISP_RANK")
+
+def test_escalation_keeps_the_strongest_regardless_of_fill_order():
+    """A weaker escalation arriving AFTER a stronger one never lowers the
+    decision's STOP, and a stronger one arriving after a weaker one always
+    raises it -- both directions, same shared rank table."""
+    hard = (T.StopLevel.HARD, T.StopDisposition.FLATTEN, "venue-initiated fill")
+    d = R.reconcile(inp([cf(C.FillClass.UNATTRIBUTED_VENUE), cf(C.FillClass.RETRACTED)], real_position=2.0))
+    assert d.stop == hard
+    d = R.reconcile(inp([cf(C.FillClass.RETRACTED), cf(C.FillClass.UNATTRIBUTED_VENUE)], real_position=2.0))
+    assert d.stop == hard

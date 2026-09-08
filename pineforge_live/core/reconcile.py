@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pineforge_live import types as T
 from .classify import ClassifiedFill, FillClass, EmulatedFill
+from .riskguard import stronger
 
 @dataclass(frozen=True)
 class DeadBand:
@@ -99,25 +100,28 @@ class ReconcileDecision:
     stop: tuple[T.StopLevel, T.StopDisposition, str] | None = None
     skipped_cycle: bool = False; residual_qty: float = 0.0; counters: dict[str, int] = field(default_factory=dict)
 
-_STOP_RANK = {T.StopLevel.NONE: 0, T.StopLevel.FLAT_ONLY: 1, T.StopLevel.HARD: 2}
-_DISP_RANK = {T.StopDisposition.NONE: 0, T.StopDisposition.HOLD: 1, T.StopDisposition.FLATTEN: 2}
-
 def _side_for(delta: float) -> T.Side:
     return T.Side.BUY if delta > 0 else T.Side.SELL
 
 def _escalate(d: ReconcileDecision, level: T.StopLevel, disp: T.StopDisposition, cause: str) -> None:
-    """Raises `d.stop` to `(level, disp, cause)` only when that is
-    STRICTLY more severe than what's already recorded this decision --
-    level first, disposition as the tiebreak at an equal level (spec
-    §5.5's own lattice: `FLATTEN` outranks `HOLD` at the same STOP level).
-    On an EQUAL level+disposition the FIRST cause recorded wins (N10):
-    `reconcile()` may call this several times in one decision (once per
-    escalating classified fill), and keeping the first is a more useful
-    audit trail than whichever call happened to run last."""
+    """Raises `d.stop` to `(level, disp, cause)` only when that STRICTLY
+    outranks what's already recorded this decision, judged by
+    `riskguard.stronger()` -- the ONE rank table in the codebase (level
+    first, `NONE < FLAT_ONLY < HARD`; disposition as the tiebreak at an
+    equal level, `FLATTEN > HOLD > NONE`). This module used to carry its
+    own copy of that lattice; `StopController.raise_stop`/`restore()` and
+    this function now agree by construction rather than by two tables
+    happening to stay in sync.
+
+    On an EQUAL (level, disposition) the FIRST cause recorded wins (N10)
+    -- `stronger()` is strict, so an equal pair is not stronger than
+    itself: `reconcile()` may call this several times in one decision
+    (once per escalating classified fill), and keeping the first is a
+    more useful audit trail than whichever call happened to run last."""
     if d.stop is None:
         d.stop = (level, disp, cause); return
     cur_level, cur_disp, _ = d.stop
-    if _STOP_RANK[level] > _STOP_RANK[cur_level] or (level == cur_level and _DISP_RANK[disp] > _DISP_RANK[cur_disp]):
+    if stronger((level, disp), (cur_level, cur_disp)):
         d.stop = (level, disp, cause)
 
 def _missed_side(ledger_position: float, e: EmulatedFill) -> int:
@@ -313,7 +317,10 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
     # ---- gate: this decision's OWN escalation (if any) applies to its
     # OWN corrections (M3) -- derive the FINAL level before building any.
     level = inp.stop_level
-    if d.stop is not None and _STOP_RANK[d.stop[0]] > _STOP_RANK[level]:
+    # Level-only comparison (the gate below reads nothing but the level):
+    # pairing both sides with the SAME disposition makes `stronger()`
+    # fall through to its level rank, so this stays the shared table too.
+    if d.stop is not None and stronger((d.stop[0], T.StopDisposition.NONE), (level, T.StopDisposition.NONE)):
         level = d.stop[0]
     flat_only = level in (T.StopLevel.FLAT_ONLY, T.StopLevel.HARD)
 
