@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "strategy_name": "my-strategy",
+  "strategy_path": "./strategy.so",
+  "history_path": "./history.csv",
+  "journal_path": "./signals.sqlite3",
+  "mode": "stream",
+  "script_tf": "15",
+  "trigger_mode": "settled",
+  "instrument": {
+    "venue": "provided-feed",
+    "market_type": "perp",
+    "symbol": "ETHUSDT"
+  },
+  "syminfo": {
+    "ticker": "ETHUSDT",
+    "tickerid": "provided-feed:ETHUSDT",
+    "prefix": "provided-feed",
+    "root": "ETH",
+    "type": "crypto",
+    "currency": "USDT",
+    "basecurrency": "ETH",
+    "mintick": 0.01,
+    "pricescale": 100,
+    "pointvalue": 1.0,
+    "minmove": 1,
+    "session": "24x7",
+    "timezone": "Etc/UTC",
+    "volumetype": "base",
+    "description": "Example Ether perpetual feed; replace with your instrument metadata"
+  },
+  "inputs": [],
+  "overrides": [],
+  "horizon_bars": 1000000,
+  "webhook": {
+    "target_url": "http://127.0.0.1:8765/webhook",
+    "secret_env": "PINEFORGE_WEBHOOK_SECRET",
+    "timeout_ms": 10000,
+    "max_attempts": 8,
+    "backoff_initial_ms": 1000,
+    "backoff_max_ms": 60000,
+    "retry_after_max_ms": 300000,
+    "allow_insecure_http": true
+  },
+  "source": {
+    "kind": "stdin"
+  }
+}

@@ -1,4 +1,10 @@
-# B3 — durable execution, venue adapters, and runtime drivers
+# B3 — historical venue-execution plan
+
+> Superseded on 2026-09-09 by the user's explicit OSS contract: every
+> strategy order action emits a simple webhook event, with no broker tied to
+> the runner. Broker adapters, account admission, mirror/dead-man execution
+> and production exchange evidence below are not requirements of the public
+> signal runtime. The current contract is [webhooks.md](webhooks.md).
 
 Status: implementation plan, 2026-09-09. This continues the approved live
 design and B2 at `1a3a6fb`; it is not evidence that an exchange integration

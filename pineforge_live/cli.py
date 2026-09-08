@@ -1,6 +1,4 @@
-"""pineforge-live CLI: version/engine-info/journal-inspect (operator
-diagnostics) and tape-smoke (the B1 tape -> engine end-to-end smoke, no
-journal writes). Plan B4 adds `replay`; Plan B3 adds `run`/`check`."""
+"""Broker-neutral strategy webhooks, queue recovery and engine diagnostics."""
 from __future__ import annotations
 import argparse, asyncio, contextlib, sys
 from pathlib import Path
@@ -160,15 +158,91 @@ def cmd_stop_clear(a):
     return 0
 
 
+def cmd_signals(a):
+    import json
+    from pineforge_live.config import load_signal_config
+    from pineforge_live.signals.runtime import run_signals
+    config=load_signal_config(a.config)
+    report=asyncio.run(run_signals(config,mode=a.signal_mode))
+    print(json.dumps(report,sort_keys=True))
+    return 1 if report['error'] else 0
+
+
+def cmd_webhooks(a):
+    import json
+    from pineforge_live.config import read_json, WebhookConfig
+    from pineforge_live.journal import Journal
+    from pineforge_live.journal.fence import FencedLease
+    from pineforge_live.signals.runtime import WallClock
+    from pineforge_live.webhooks.store import Outbox
+    from pineforge_live.webhooks.delivery import Dispatcher
+    # Queue recovery must remain available after the strategy library or
+    # original history moved. Select the stored epoch, never silently
+    # initialize an empty queue from a freshly rebuilt strategy hash.
+    config_path=a.config.expanduser().resolve()
+    document=read_json(config_path)
+    journal_path=Path(document['journal_path']).expanduser()
+    if not journal_path.is_absolute():journal_path=(config_path.parent/journal_path).resolve()
+    webhook=WebhookConfig(**document['webhook'])
+    clock=WallClock()
+    with contextlib.closing(Journal.open(journal_path,create=False)) as journal:
+        has_queue=journal._exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='webhook_targets'").fetchone()
+        if not has_queue:raise ValueError('journal has no initialized webhook queue')
+        epochs=[r[0] for r in journal._exec('SELECT epoch_hash FROM webhook_targets ORDER BY rowid').fetchall()]
+        selected=a.epoch
+        if selected is None:
+            if len(epochs)!=1:
+                raise ValueError('select a stored --epoch: '+','.join(epochs))
+            selected=epochs[0]
+        if selected not in epochs:raise ValueError('requested epoch does not exist in the webhook journal')
+        outbox=Outbox(journal,selected,webhook.target_url)
+        if a.queue_action=='inspect':
+            rows=outbox.inspect()
+            print(json.dumps([{k:r[k] for k in ('sequence','event_id','state','attempts','total_attempts',
+                                               'next_attempt_ms','http_status','error')}
+                              for r in rows],sort_keys=True))
+            return 0
+        lease=FencedLease(journal_path.parent/(journal_path.name+'.lock'),journal)
+        lease_ms=max(30_000,webhook.timeout_ms*3)
+        lease.acquire(lease_ms,clock.now_ms())
+        async def owned(timeout_ms):
+            if lease.expired(clock.now_ms()):return False
+            if clock.now_ms()+timeout_ms>=lease.expiry_ms:lease.renew(clock.now_ms(),lease_ms)
+            return True
+        try:
+            if a.queue_action=='retry':outbox.retry(a.event_id,clock.now_ms())
+            elif a.queue_action=='skip':outbox.skip(a.event_id,a.cause,clock.now_ms())
+            report=asyncio.run(Dispatcher(outbox,webhook,clock,lease_check=owned).drain())
+            from dataclasses import asdict
+            print(json.dumps(asdict(report),sort_keys=True))
+            return 1 if report.pending or report.failed else 0
+        finally:
+            if lease.token is not None:lease.release(clock.now_ms())
+
+
 def main(argv=None) -> int:
     """Parse argv and dispatch to the matching `cmd_*` handler; exit codes
     are 0 ok, 2 usage (argparse), 1 error (any exception from a handler)."""
     p = argparse.ArgumentParser(
         prog="pineforge-live",
-        description="pineforge-live diagnostics, offline execution replay, and fenced STOP recovery.",
+        description="Run compiled PineScript strategies and deliver broker-neutral order-action webhooks.",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("version", help="print the CLI/adapter-api/bar-policy version line").set_defaults(fn=cmd_version)
+
+    for command,mode,help_text in (('run','stream','consume a market stream and emit strategy webhooks'),
+                                  ('check','check','process one JSONL/HTTP snapshot, deliver webhooks, and exit')):
+        s=sub.add_parser(command,help=help_text)
+        s.add_argument('--config',type=Path,required=True)
+        s.set_defaults(fn=cmd_signals,signal_mode=mode)
+    for command,action in (('webhook-inspect','inspect'),('webhook-flush','flush'),
+                           ('webhook-retry','retry'),('webhook-skip','skip')):
+        s=sub.add_parser(command,help=f'{action} durable webhook delivery records')
+        s.add_argument('--config',type=Path,required=True)
+        s.add_argument('--epoch',help='stored epoch to recover when the journal contains multiple deployments')
+        if action in ('retry','skip'):s.add_argument('--event-id',required=True)
+        if action=='skip':s.add_argument('--cause',required=True)
+        s.set_defaults(fn=cmd_webhooks,queue_action=action)
 
     s = sub.add_parser("engine-info", description="Print the engine .so's ABI version, build version, "
                         "export coverage, and pending-order field layout.",

@@ -1,4 +1,9 @@
-# Offline execution and recovery
+# Historical mock execution and recovery
+
+> The public product now emits broker-neutral webhooks. This page documents
+> the earlier optional mock-execution research path; its broker/account
+> integration checklist is superseded by the webhook contract. See
+> [webhooks.md](webhooks.md) for the supported `run`/`check` workflow.
 
 The local B3 path turns core `ActionRequest`s into durable mock-venue orders.
 It exercises real submit, lookup, order history and fill history calls through

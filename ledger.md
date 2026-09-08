@@ -1,5 +1,41 @@
 # pineforge-live work ledger
 
+## Current public contract — broker-neutral webhooks (2026-09-09)
+
+The user clarified that this repository is OSS and each strategy order action
+should trigger a simple webhook event, independent of any broker. This
+**supersedes the earlier B3 broker/exchange integration plan**. The C++ engine
+continues to compute every strategy decision; Python owns data input, durable
+state and HTTP delivery. No broker credentials or account admission are
+required by the public `run`/`check` path.
+
+Implemented: settled and optional provisional intrabar alerts, neutral
+stdin/JSONL/HTTP/WebSocket feeds, dedicated C++ worker, atomic ledger/outbox
+checkpoints, ordered at-least-once webhooks with stable IDs and HMAC, bounded
+retries and explicit queue recovery, restart-safe tick provenance,
+configuration loading, CLI commands, runnable corpus demo, durable example
+receiver, and Apache-2.0 package metadata. The README and docs/webhooks.md
+are the supported public workflow. Broker-specific work below is historical,
+not unfinished work for this contract.
+
+Validation in progress: 813 tests passed with the ABI-v4 engine; 666 passed
+and 147 skipped without it. Generic HTTP and WebSocket transport, compiled
+strategy to signed HTTP delivery, queue/receiver crash recovery, and no
+duplicate actions after restart are tested. Independent review found and
+fixed lease-before-POST timing, long-recompute SQLite contention, artifact-
+independent queue recovery, startup refusal reporting, tick timestamp
+regression and restored forming-bar provenance. C++ computation now stages
+writes without holding SQLite's writer lock, and rechecks authority in the
+short atomic commit. A real subprocess sender/receiver demo delivered 37
+signed unique events across SMA, bracket and orders-on-close strategies;
+restarting each through `check` delivered zero duplicates. Final exact-
+candidate Grok review follows.
+
+No push or public repository creation is performed; the earlier no-push
+instruction remains in force.
+
+## Historical work before the webhook clarification
+
 ## Continuation of Claude session 08f941f2-ec0e-4df3-aada-eaef4778b971
 
 Recovered baseline: B2 completed at `1255ef4`; OSS README committed as
@@ -51,7 +87,8 @@ on the final candidate before this continuation is reported complete.
 
 ## Remaining work and gates
 
-B3 is **not complete**. The local executable slice is not trading readiness.
+Historical status before the webhook clarification: venue-execution B3 was
+not complete. That broker-coupled scope is now superseded above.
 Remaining implementation is specified in [docs/plan-b3.md](docs/plan-b3.md):
 real instrument/exchange adapters; full observed-order adoption/absence
 proof; late/partial/chunk reconciliation; live stream/cron scheduling;
