@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -276,6 +277,7 @@ def run_task(manifest, store, index, count, workspace, *, manifest_sha256=None):
         "manifestSha256": manifest_sha256, "manifest": manifest,
         "assignedProbeIds": assigned, "startedAtMs": time.time_ns()//1_000_000,
         "results": [], "setupError": None, "registryMutated": False,
+        "pythonVersion": sys.version.split()[0], "sqliteVersion": sqlite3.sqlite_version,
     }
     try:
         baked_commit = os.environ.get("PINEFORGE_LIVE_BUILD_COMMIT")

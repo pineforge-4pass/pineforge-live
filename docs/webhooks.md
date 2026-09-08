@@ -360,3 +360,27 @@ recovery. Volume-only forming updates participate in the evaluation cadence.
 `syminfo.timezone` (the exchange clock). Omission preserves the existing
 exchange-clock default; an empty string selects the engine's UTC chart path.
 Keep the same setting in the corresponding backtest.
+
+A session calendar can optionally include `first_minute_ms` when a native
+bar's timestamp precedes market open, for example a 17:00 daily label whose
+first trade minute is 18:00. This time must fall within the parent window.
+The emitted parent keeps `open_ms` as its label; every minute from
+`first_minute_ms` through `close_ms` remains required. Use the same calendar
+for real feeds and `mock-feed`; do not use this field to hide missing data.
+
+For same-symbol `request.security()` calls needing a finer timeframe, set
+`auxiliary_history_path` to an immutable 1m OHLCV warmup CSV in addition to your
+script-timeframe `history_path`. The auxiliary file must cover the historical
+chart and end before the first live script bar. Keep it fixed: the runner
+appends newly observed minute data from either input mode internally, and
+restores that tail from the journal on restart. A changed warmup file changes
+the deployment identity.
+
+C++ receives native script bars for strategy execution and broker decisions,
+and the auxiliary 1m feed for `request.security()`. Tick probes can see only the
+current partial minute plus already observed minutes. A script requesting
+15m data while running on 1D can therefore use the same runner. Use the same
+history, auxiliary data, timezones and strategy settings in its backtest.
+This auxiliary route does not supply native intrabars to
+`request.security_lower_tf()`; that function retains the pinned C++ engine's
+native-chart behavior.

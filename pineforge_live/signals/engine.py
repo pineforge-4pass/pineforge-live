@@ -95,6 +95,7 @@ class SignalEngine:
         self.forming_from_ticks=False
         self.last_tick=None
         self.input_state=None
+        self._candidate_input_state=None
         self.last_input_minute=None
         journal.con.executescript('''
 CREATE TABLE IF NOT EXISTS signal_checkpoints(
@@ -106,11 +107,43 @@ CREATE TABLE IF NOT EXISTS signal_input_minutes(
  PRIMARY KEY(epoch_hash,ts_open));
 ''')
         epoch_document=asdict(spec)
+        if epoch_document.get('auxiliary_history_sha256') is None:epoch_document.pop('auxiliary_history_sha256',None)
         if epoch_document.get('chart_timezone') is None:epoch_document.pop('chart_timezone',None)
         if epoch_document.get('parent_windows') is None:
             epoch_document.pop('parent_windows',None)  # Keep existing unscheduled journal identities.
         journal.append_epoch(self.epoch, _canonical(epoch_document))
         journal.append_runtime_config(self.config_hash, _canonical({'strategy_name':strategy_name,'mode':mode,'message':message}))
+        if getattr(handle,'auxiliary_history',None) is not None:
+            handle.auxiliary_provider=self._observed_auxiliary_minutes
+
+    def _observed_auxiliary_minutes(self):
+        """Rebuild the feed tail from committed minutes plus this input only.
+
+        The current input is visible to C++ before its atomic decision commit.
+        A failed commit leaves no durable tail; restart uses checked journal
+        rows and the original immutable warmup, never an uncommitted cache.
+        """
+        result=[]
+        for row in self.j._exec('SELECT * FROM signal_input_minutes WHERE epoch_hash=? ORDER BY ts_open',(self.epoch,)):
+            domain=[self.epoch,row['ts_open'],row['payload_json']]
+            if row['checksum']!=T.canonical_sha256(domain):
+                raise SignalRecoveryRequired('auxiliary input minute checksum mismatch')
+            bar=T.NormalizedBar(**json.loads(row['payload_json']));validate_minute(bar)
+            if bar.ts_open!=row['ts_open']:
+                raise SignalRecoveryRequired('auxiliary input minute timestamp mismatch')
+            result.append(bar)
+        state=self._candidate_input_state if self._candidate_input_state is not None else self.input_state
+        if state is not None:
+            stream=MinuteStream.from_state(state,parent_windows=self.ledger.calendar)
+            for bar in (stream.last_input,stream.pending):
+                if bar is None:continue
+                if result and bar.ts_open==result[-1].ts_open:
+                    if bar.ohlcv()!=result[-1].ohlcv():
+                        raise SignalRecoveryRequired('auxiliary input changed before commit')
+                elif result and bar.ts_open<result[-1].ts_open:
+                    raise SignalRecoveryRequired('auxiliary input state regressed')
+                else:result.append(bar)
+        return result
 
     def _check(self):
         if self.j.con.in_transaction:
@@ -214,6 +247,9 @@ CREATE TABLE IF NOT EXISTS signal_input_minutes(
             raise SignalRecoveryRequired('seed once per runtime')
         if not history:
             raise ValueError('confirmed warmup history is required')
+        auxiliary=getattr(self.h,'auxiliary_history',None)
+        if auxiliary is not None and auxiliary.last_ms>=self.ledger.bar_close(history[-1].ts_open):
+            raise SignalRecoveryRequired('auxiliary warmup must end before the first live script bar')
         if history[0].ts_open != self.spec.history_start_ms:
             raise ValueError('history must begin at epoch.history_start_ms')
         width = tf_ms(self.spec.script_tf)
@@ -313,8 +349,11 @@ CREATE TABLE IF NOT EXISTS signal_input_minutes(
         try:
             staged=_StagedJournal(self.j)
             self.ledger.j=staged
+            self._candidate_input_state=input_state
             try:result=self.ledger.settle(bar,now_ms)
-            finally:self.ledger.j=self.j
+            finally:
+                self.ledger.j=self.j
+                self._candidate_input_state=None
             with self.j.transaction():
                 self._authorize_commit()
                 if result is previous:
@@ -364,7 +403,9 @@ CREATE TABLE IF NOT EXISTS signal_input_minutes(
             raise ValueError('forming bar must immediately follow the confirmed ledger')
         try:
             staged=_StagedJournal(self.j)
-            pr=self.probe.evaluate(forming,now_ms,journal=staged) if self.mode == 'intrabar' else None
+            self._candidate_input_state=input_state
+            try:pr=self.probe.evaluate(forming,now_ms,journal=staged) if self.mode == 'intrabar' else None
+            finally:self._candidate_input_state=None
             with self.j.transaction():
                 self._authorize_commit()
                 staged.flush()

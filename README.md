@@ -358,3 +358,18 @@ execution acknowledgments belong to your receiver or broker bridge.
 Licensed under [Apache-2.0](LICENSE), matching the PineForge engine. Contributions
 that improve neutral adapters, replay coverage and webhook integrations are
 welcome. No external service or PineForge-hosted account is required.
+
+A session calendar can optionally include `first_minute_ms` when a native
+bar's timestamp precedes market open, for example a 17:00 daily label whose
+first trade minute is 18:00. This time must fall within the parent window.
+The emitted parent keeps `open_ms` as its label; every minute from
+`first_minute_ms` through `close_ms` remains required. Use the same calendar
+for real feeds and `mock-feed`; do not use this field to hide missing data.
+
+For a strategy such as a 1D script that calls `request.security()` on 15m,
+add `"auxiliary_history_path": "history-1m.csv"`. This immutable 1m warmup must
+cover the script history and end before live input. Both feed modes extend it
+with observed minutes through the same runner, including after restart. C++
+continues to execute and fill orders on native script bars while its security
+queries read the auxiliary feed. See the [feed contract](docs/webhooks.md) for
+history boundaries and the separate `request.security_lower_tf()` limitation.

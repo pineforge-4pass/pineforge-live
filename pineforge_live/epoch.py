@@ -1,6 +1,6 @@
 """Epoch, code identity and runtime configuration (spec §1)."""
 from __future__ import annotations
-import copy
+import copy,re
 from collections.abc import Sequence
 from dataclasses import dataclass, field, asdict
 from pineforge_live import ADAPTER_API_VERSION
@@ -84,11 +84,15 @@ class EpochSpec:
     trade_start_ms: int | None = None
     parent_windows: tuple[tuple[int,int], ...] | None = None
     chart_timezone: str | None = None
+    auxiliary_history_sha256: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "inputs", tuple(tuple(kv) for kv in self.inputs))
         object.__setattr__(self, "overrides", tuple(tuple(kv) for kv in self.overrides))
         tf_ms(self.script_tf)  # F6: reject an epoch that can never run, where it is built
+        if self.auxiliary_history_sha256 is not None and (not isinstance(self.auxiliary_history_sha256,str)
+                or not re.fullmatch('[0-9a-f]{64}',self.auxiliary_history_sha256)):
+            raise ValueError('auxiliary_history_sha256 must be a full SHA-256')
         if self.chart_timezone is not None:
             if not isinstance(self.chart_timezone, str) or '\x00' in self.chart_timezone:
                 raise ValueError('chart_timezone must be a string or None')
@@ -171,6 +175,8 @@ class EpochSpec:
             "engine_syminfo_hash": self.syminfo.hash(), "reference_tape_sha256": self.reference_tape_sha256}
         if self.parent_windows is not None:
             identity['parent_windows_sha256'] = self._parent_windows_sha256
+        if self.auxiliary_history_sha256 is not None:
+            identity['auxiliary_history_sha256'] = self.auxiliary_history_sha256
         return canonical_sha256(identity)
 
 def apply_epoch(handle, spec: EpochSpec) -> list[tuple[str, tuple]]:
@@ -192,6 +198,9 @@ def apply_epoch(handle, spec: EpochSpec) -> list[tuple[str, tuple]]:
     only the partial prefix up to the failure -- the caller must discard
     the handle rather than continue using or retrying it.
     """
+    history=getattr(handle,'auxiliary_history',None)
+    if (history.sha256 if history is not None else None)!=spec.auxiliary_history_sha256:
+        raise RuntimeError('epoch auxiliary history is not bound to the engine handle')
     handle.setter_log.clear()
     for name, args in spec.setter_sequence():
         rc = getattr(handle, name)(*args)

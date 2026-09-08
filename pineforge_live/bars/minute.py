@@ -106,7 +106,8 @@ class MinuteBarAggregator:
         if end > _MAX_TS:
             raise ValueError("minute: script bucket exceeds timestamp bound")
         if self._last is None:
-            if bar.ts_open != start:
+            first=self.calendar.first_minute(start) if self.calendar is not None else start
+            if bar.ts_open != first:
                 raise ValueError("first minute must begin script bucket; restore state for a partial bucket")
             missing = []
         else:
@@ -181,7 +182,7 @@ class MinuteBarAggregator:
             "version": MINUTE_POLICY_VERSION, "script_tf": self.script_tf,
             "gap_policy": self.gap_policy, "volume_decimals": self.volume_decimals,
             "max_gap_minutes": self.max_gap_minutes,
-            "parent_windows": self.calendar.windows if self.calendar is not None and not compact else None,
+            "parent_windows": self.calendar.records if self.calendar is not None and not compact else None,
             "calendar_sha256": self.calendar.sha256 if self.calendar is not None else None,
             "forming": asdict(self._cur) if self._cur is not None else None,
             "last_minute": asdict(self._last) if self._last is not None else None,

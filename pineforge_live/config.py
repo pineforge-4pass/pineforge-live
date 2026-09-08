@@ -142,6 +142,7 @@ class SignalConfig:
     input_tf: str | None = None
     input_mode: str = 'mixed'
     parent_windows: tuple[tuple[int,int], ...] | None = None
+    auxiliary_history_path: Path | None = None
 
     @property
     def library_path(self):
@@ -158,7 +159,7 @@ def load_signal_config(path: str | Path) -> SignalConfig:
     base = path.parent
     d = _object(read_json(path), 'config',
                 ('strategy_path', 'strategy_name', 'history_path', 'journal_path', 'script_tf', 'instrument', 'syminfo', 'webhook', 'source'),
-                ('schema_version', 'strategy_source_path', 'mode', 'inputs', 'overrides', 'horizon_bars', 'trigger_mode', 'max_eval_rate', 'input_tf', 'input_mode', 'parent_windows_path', 'chart_timezone'))
+                ('schema_version', 'strategy_source_path', 'mode', 'inputs', 'overrides', 'horizon_bars', 'trigger_mode', 'max_eval_rate', 'input_tf', 'input_mode', 'parent_windows_path', 'chart_timezone', 'auxiliary_history_path'))
     if type(d.get('schema_version', 1)) is not int or d.get('schema_version', 1) != 1:
         raise ConfigError('schema_version: unsupported version')
     strategy = _path(d['strategy_path'], 'strategy_path', base)
@@ -190,6 +191,12 @@ def load_signal_config(path: str | Path) -> SignalConfig:
         raise ConfigError('input_mode: expected mixed, ticks or bars')
     if input_mode != 'mixed' and not (input_tf == '1' and width > 60_000):
         raise ConfigError('input_mode: ticks/bars modes require input_tf=1 and script_tf>1')
+    auxiliary_history_path=None
+    if 'auxiliary_history_path' in d:
+        if input_tf!='1' or width<=60_000:
+            raise ConfigError('auxiliary_history_path: requires input_tf=1 and script_tf>1')
+        auxiliary_history_path=_path(d['auxiliary_history_path'],'auxiliary_history_path',base)
+        protected_paths.add(auxiliary_history_path)
     parent_windows=None
     if 'parent_windows_path' in d:
         if input_tf!='1' or width<=60_000:
@@ -274,6 +281,7 @@ def load_signal_config(path: str | Path) -> SignalConfig:
         library_sha = file_sha256(strategy)
         history_sha = file_sha256(history_path)
         source_sha = file_sha256(strategy_source) if strategy_source else 'unrecorded'
+        auxiliary_sha = file_sha256(auxiliary_history_path) if auxiliary_history_path else None
     except OSError:
         raise ConfigError('identity: could not read strategy or history file') from None
     source_identity=_canonical(asdict(source))
@@ -289,10 +297,11 @@ def load_signal_config(path: str | Path) -> SignalConfig:
     code = CodeIdentity(library_sha, 'unrecorded', source_sha, receipt)
     epoch = EpochSpec(instrument.venue, instrument, d['script_tf'], history[0].ts_open, horizon,
                       code, syminfo, history_sha, inputs=settings['inputs'], overrides=settings['overrides'],
-                      parent_windows=parent_windows, chart_timezone=chart_timezone)
+                      parent_windows=parent_windows, chart_timezone=chart_timezone,
+                      auxiliary_history_sha256=auxiliary_sha)
     # Normalize defaults and paths so implicit defaults do not create spurious identities.
     identity = {'strategy_name': d['strategy_name'], 'epoch_hash': epoch.epoch_hash(), 'mode': mode,
                 'trigger_mode': trigger_mode, 'max_eval_rate': max_eval_rate, 'webhook': asdict(webhook), 'source': source_identity}
     return SignalConfig(path, strategy, d['strategy_name'], strategy_source, history_path, journal_path,
                         mode, d['script_tf'], instrument, syminfo, settings['inputs'], settings['overrides'],
-                        horizon, trigger_mode, webhook, source, epoch, T.canonical_sha256(_canonical(identity)), history, max_eval_rate, input_tf, input_mode,parent_windows)
+                        horizon, trigger_mode, webhook, source, epoch, T.canonical_sha256(_canonical(identity)), history, max_eval_rate, input_tf, input_mode,parent_windows,auxiliary_history_path)

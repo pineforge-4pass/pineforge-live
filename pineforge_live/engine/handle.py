@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Sequence
 from . import abi
 from .report import RunResult, collect, pending_order_layout
+from .auxiliary import AuxiliaryHistory
 from ..bars.policy import tf_ms
 
 PATH_ORDER_AUTO, PATH_ORDER_HIGH_FIRST, PATH_ORDER_LOW_FIRST = 0, 1, 2
@@ -106,7 +107,28 @@ class EngineHandle:
         self._params_json = json.dumps(params or {}).encode()
         self._layout = pending_order_layout(self.lib)
         self.setter_log: list[tuple[str, tuple]] = []   # ordered, feeds the epoch hash (§1)
+        self.auxiliary_history = None
+        self.auxiliary_provider = None
         self._s = self._create_strategy()
+
+    def set_auxiliary_history(self, path, sha256, *, start_ms=0):
+        if not hasattr(self.lib,'strategy_set_aux_security_feed'):
+            raise abi.EngineAbiError('strategy library lacks auxiliary request.security feed support')
+        fn=self.lib.strategy_set_aux_security_feed
+        fn.argtypes=[ctypes.c_void_p,ctypes.POINTER(abi.BarC),ctypes.c_int,ctypes.c_char_p]
+        fn.restype=ctypes.c_int
+        self.auxiliary_history=AuxiliaryHistory.read(path,sha256,start_ms=start_ms)
+
+    def _apply_auxiliary(self, strategy):
+        if getattr(self,'auxiliary_history',None) is None:return
+        observed=self.auxiliary_provider() if self.auxiliary_provider is not None else ()
+        data,count=self.auxiliary_history.with_observed(observed)
+        if ctypes.sizeof(abi.BarC)!=48 or any(getattr(abi.BarC,name).offset!=i*8
+                for i,name in enumerate(('open','high','low','close','volume','timestamp'))):
+            raise abi.EngineAbiError('auxiliary bar layout mismatch')
+        bars=(abi.BarC*count).from_buffer(data)
+        if self.lib.strategy_set_aux_security_feed(strategy,bars,count,b'1')!=0:
+            raise abi.EngineAbiError('C++ engine rejected auxiliary 1m feed')
 
     def _create_strategy(self):
         s = self.lib.strategy_create(self._params_json)
@@ -203,6 +225,7 @@ class EngineHandle:
                 _SETTER_APPLY[name](self.lib, new_s, *args)
             for name, args in per_run:
                 _SETTER_APPLY[name](self.lib, new_s, *args)
+            self._apply_auxiliary(new_s)
         except Exception:
             self.lib.strategy_free(new_s)
             raise
@@ -248,5 +271,7 @@ class EngineHandle:
     def close(self):
         if self._s:
             self.lib.strategy_free(self._s); self._s = None
+        self.auxiliary_provider=None
+        self.auxiliary_history=None
     def __enter__(self): return self
     def __exit__(self, *exc): self.close()

@@ -50,13 +50,22 @@ def test_feed_reader_rejects_invalid_order_and_nonfinite(tmp_path):
 
 
 class FakeHandle:
-    def __init__(self,*args):pass
+    def __init__(self,*args):self.auxiliary_history=None;self.auxiliary_provider=None
+    def set_auxiliary_history(self,path,sha,*,start_ms=0):
+        from pineforge_live.engine.auxiliary import AuxiliaryHistory
+        self.auxiliary_history=AuxiliaryHistory.read(path,sha,start_ms=start_ms)
     def __enter__(self):return self
     def __exit__(self,*args):pass
     def close(self):pass
     def request_abort(self):pass
     def run_full(self,bars,*args,**kwargs):
         rows=[b.ohlcv() if hasattr(b,'ohlcv') else b for b in bars]
+        if self.auxiliary_history is not None:
+            observed=self.auxiliary_provider() if self.auxiliary_provider else ()
+            data,_=self.auxiliary_history.with_observed(observed)
+            from pineforge_live.engine.auxiliary import _BAR
+            effective=sum(row[-1]<rows[-1][0]+180000 for row in _BAR.iter_unpack(data))
+            assert effective==len(rows)*3,'fake verifier expects exact 1m coverage through the chart tail'
         hashes=[int(T.canonical_sha256(row)[:15],16) for row in rows]
         trades=[]
         if len(rows)>=4:
@@ -71,10 +80,25 @@ class EmptyHandle(FakeHandle):
                        position_avg_price=float('nan'),net_profit=0.)
 
 
-@pytest.mark.parametrize('handle_type,expected_actions,status',[(FakeHandle,2,'passed'),(EmptyHandle,0,'unmeasured')])
-def test_verifier_runs_both_modes_real_http_and_restart_with_fake_decisions(tmp_path,monkeypatch,handle_type,expected_actions,status):
+class RepaintingHandle(FakeHandle):
+    def run_full(self,bars,*args,**kwargs):
+        result=super().run_full(bars,*args,**kwargs)
+        if len(bars)==8:
+            return replace(result,broker_state_hash=[result.broker_state_hash[0]^1,*result.broker_state_hash[1:]])
+        return result
+
+
+@pytest.mark.parametrize('auxiliary',[False,True])
+@pytest.mark.parametrize('handle_type,expected_actions,status,corrupt_actions',[(FakeHandle,2,'passed',False),(EmptyHandle,0,'unmeasured',False),(FakeHandle,2,'failed',True),(RepaintingHandle,2,'failed',False)])
+def test_verifier_runs_both_modes_real_http_and_restart_with_fake_decisions(tmp_path,monkeypatch,handle_type,expected_actions,status,corrupt_actions,auxiliary):
     """Tests verifier wiring; fake decisions never count as probe measurements."""
     import pineforge_live.signals.runtime as runtime
+    if corrupt_actions:
+        import pineforge_live.signals.engine as signals
+        original=case.emulated_from_settle
+        def doubled(*args):return [replace(fill,qty=fill.qty*2) for fill in original(*args)]
+        monkeypatch.setattr(case,'emulated_from_settle',doubled)
+        monkeypatch.setattr(signals,'emulated_from_settle',doubled)
     monkeypatch.setattr(case,'EngineHandle',handle_type)
     monkeypatch.setattr(runtime,'EngineHandle',handle_type)
     monkeypatch.setattr(case,'apply_epoch',lambda *args:None)
@@ -83,7 +107,7 @@ def test_verifier_runs_both_modes_real_http_and_restart_with_fake_decisions(tmp_
     monkeypatch.setitem(sys.modules,'source_trade_provenance',SimpleNamespace(validate_source_trade_pairing=lambda x:None))
     so=tmp_path/'fixture.so';so.write_bytes(b'FAKE LIBRARY - NEVER LOADED')
     monkeypatch.setattr(case,'compile_strategy',lambda x:so)
-    source=tmp_path/'fixture.pine';source.write_text('// FAKE - never transpiled')
+    source=tmp_path/'fixture.pine';source.write_text('// FAKE - never transpiled\n'+('value = request.security(syminfo.tickerid, "1", close)' if auxiliary else ''))
     minutes=[minute(i) for i in range(24)]
     agg=MinuteBarAggregator('3');parents=[]
     for m in minutes:parents.extend(agg.push(m))
@@ -96,7 +120,9 @@ def test_verifier_runs_both_modes_real_http_and_restart_with_fake_decisions(tmp_
          'tick_policies':['high-first','low-first'],'seed':7}
     result=case.verify(doc)
     assert result['status']==status,result
+    if handle_type is RepaintingHandle:assert result['native_prefix_mismatches']==[0]
     assert result['native_chart_equal'] and result['batch_actions_in_window']==expected_actions
+    assert all(x['closed_trade_exit_quantity_equal'] is (not corrupt_actions) for x in result['modes'].values())
     assert set(result['modes'])=={'bars-direct','ticks-high-first','ticks-low-first'}
     assert all(x['actions']==expected_actions and x['restart_deliveries']==0 and x['input_minutes']==6 for x in result['modes'].values())
 

@@ -151,9 +151,20 @@ The replay calendar uses only chart/minute timestamps, never prices or actions.
 
 This is live/batch equivalence verification, not a new campaign grade or gate.
 The optional canonical-grader diagnostic uses fixed live flags; it does not
-rerun the campaign's warmup/origin ladder, auxiliary/native security feed
-selection, or TV report-window/range-end projection. Each result records the
+rerun the campaign's warmup/origin ladder, native higher-timeframe feed
+selection, or TV report-window/range-end projection. Regular `request.security`
+probes use the original 1m auxiliary history plus observed input minutes. If
+that history starts later than the native chart, its origin is the first
+complete shared chart opening determined from timestamps and session hours. Each result records the
 actual configuration and unavailable feed coverage. Unsupported or failed
 probes remain in the result; the selection is never replaced after observation.
 Synthetic ticks represent explicit high-first and low-first models, not the
 unavailable historical exchange tick sequence.
+
+The replay window is the earliest eligible trade window with complete minute
+coverage. It retains every warmup bar from the effective history origin. The
+worker also executes the full native chart once; when reconstructed bars match
+native bars, their broker-state prefix must match that complete run. This
+keeps long-history reference evidence while bounding repeated live replay.
+A partial run is restarted after two input events before the full replay, and
+a final restart must deliver no duplicate actions.

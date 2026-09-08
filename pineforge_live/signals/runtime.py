@@ -51,6 +51,9 @@ class SignalWorker:
         handle=None
         try:
             handle=EngineHandle(c.strategy_path)
+            if c.auxiliary_history_path is not None:
+                handle.set_auxiliary_history(c.auxiliary_history_path,c.epoch.auxiliary_history_sha256,
+                                             start_ms=c.epoch.history_start_ms)
             apply_epoch(handle,c.epoch)
             outbox=Outbox(journal,c.epoch.epoch_hash(),c.webhook.target_url)
             def authority():

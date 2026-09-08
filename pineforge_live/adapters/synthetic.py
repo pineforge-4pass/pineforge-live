@@ -98,7 +98,7 @@ class SyntheticMinuteTicks:
     def export_state(self) -> dict:
         return {"version": 1, "policy": self.policy, "seed": self.seed,
                 "next_seq": self.next_seq,
-                "parent_windows": self.calendar.windows if self.calendar is not None else None,
+                "parent_windows": self.calendar.records if self.calendar is not None else None,
                 "last_minute": asdict(self._last.bar) if self._last is not None else None}
 
     @classmethod
