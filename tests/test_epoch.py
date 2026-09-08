@@ -36,6 +36,43 @@ def test_apply_epoch_replays_exact_setter_sequence(test_so):
         log = apply_epoch(h, s)
     assert log == s.setter_sequence()
     assert log[0][0] == "set_chart_timezone" and ("set_override", ("slippage", "1")) in log
+    # F2: the epoch's realtime-tail flag/horizon now reach the engine, ordered
+    # after inputs/overrides and before the (unset here) trade-start-time.
+    assert log[-2:] == [("set_realtime_tail", (True, 500_000)), ("set_broker_state_hash_recording", (True,))]
+
+def test_empty_syminfo_string_is_skipped_and_apply_still_succeeds(test_so):
+    # F3: the engine rejects (rc=-1) an empty-valued set_syminfo_string;
+    # setter_sequence() must omit the setter rather than emit-and-fail.
+    from pineforge_live.engine import EngineHandle
+    s = spec(syminfo=dataclasses.replace(syminfo(), description=""))
+    assert not any(name == "set_syminfo_string" and args[0] == "description" for name, args in s.setter_sequence())
+    with EngineHandle(test_so) as h:
+        log = apply_epoch(h, s)
+    assert log == s.setter_sequence()
+
+def test_epoch_spec_freezes_inputs_overrides_and_deep_copies_build_receipt():
+    # F4: inputs/overrides must be tuples (append-proof), and CodeIdentity's
+    # build_receipt dict must be defensively copied at construction.
+    receipt = {"compiler": "clang", "shas": ["a", "b"]}
+    ci = CodeIdentity("e" * 64, "c" * 64, "s" * 64, receipt)
+    receipt["shas"].append("mutated")
+    assert ci.build_receipt["shas"] == ["a", "b"]
+
+    s = spec()
+    assert isinstance(s.inputs, tuple) and isinstance(s.inputs[0], tuple)
+    assert isinstance(s.overrides, tuple)
+    with pytest.raises(AttributeError):
+        s.inputs.append(("x", "y"))
+    before = s.epoch_hash()
+    with pytest.raises(AttributeError):
+        s.overrides.append(("y", "z"))
+    assert s.epoch_hash() == before
+
+def test_epoch_spec_rejects_bad_script_tf_at_construction():
+    # F6: an epoch that could never run_full() is rejected where it is
+    # built, using the same validator run_full() itself uses.
+    with pytest.raises(ValueError):
+        spec(script_tf="abc")
 
 class _FakeHandle:
     """Tiny stand-in for EngineHandle: setter methods are no-ops that log their
@@ -58,6 +95,8 @@ class _FakeHandle:
     def set_syminfo_metadata(self, key, v): self._log("set_syminfo_metadata", key, v)
     def set_input(self, key, value): self._log("set_input", key, value)
     def set_override(self, key, value): self._log("set_override", key, value)
+    def set_realtime_tail(self, on, horizon_bars): self._log("set_realtime_tail", on, horizon_bars)
+    def set_broker_state_hash_recording(self, on): self._log("set_broker_state_hash_recording", on)
     def set_trade_start_time(self, ms): self._log("set_trade_start_time", ms)
 
 def test_apply_epoch_raises_on_rejected_syminfo_string():

@@ -1,5 +1,5 @@
 from __future__ import annotations
-import hashlib, json, os, sqlite3, time
+import hashlib, json, os, sqlite3, sys, time
 from pathlib import Path
 from typing import Any, Callable
 from pineforge_live import types as T
@@ -134,17 +134,35 @@ class Journal:
         lost. The returned callable is independent of any Journal instance
         (no `self`, never touches sqlite), so it is safe to call after the
         Journal it stands in for has been closed. Each call appends exactly
-        one line -- canonical JSON of `row` + "\\n" -- via a single
-        O_SYNC'd write + fsync so the line lands durably or not at all."""
+        one line -- a JSON line for `row` (N4: NOT `types.canonical_sha256`'s
+        canonical form -- this uses `default=str`, so an Enum serialises as
+        e.g. `"MarketType.PERP"`, not `_canon`'s `"perp"`; consistent with
+        `checksum()`, and never raising on an unexpected value is the right
+        property for a last-resort log) + "\\n" -- via a write loop (F5: a
+        short write, e.g. a signal or ENOSPC mid-line, must not leave a
+        torn, unparseable line behind) followed by fsync, so the line lands
+        durably or not at all.
+
+        On an OSError opening or writing the out-of-band path itself (I1:
+        e.g. the mount is missing, or full) the line is written to stderr
+        instead and this never raises -- an EMERGENCY action's record must
+        not be lost just because the one place designed to catch failures
+        has itself failed."""
         path = Path(path)
         def _append(row: dict[str, Any]) -> None:
             line = (json.dumps(row, sort_keys=True, separators=(",", ":"), default=str) + "\n").encode()
-            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_SYNC, 0o600)
             try:
-                os.write(fd, line)
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_SYNC, 0o600)
+                try:
+                    off = 0
+                    while off < len(line):
+                        off += os.write(fd, line[off:])
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            except OSError:
+                sys.stderr.write(line.decode("utf-8", "replace"))
+                sys.stderr.flush()
         return _append
 
     # --- helpers --------------------------------------------------------------

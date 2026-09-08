@@ -24,6 +24,17 @@ def test_tf_ms_rejects_bad_input():
         with pytest.raises(ValueError):
             policy.tf_ms(bad)
 
+def test_tf_ms_rejects_process_abort_escapes():
+    # F1: both strings used to reach tf_ms's old accept-anything-int()-can-
+    # parse path and only crash later inside the engine's own stoi cast
+    # (an uncaught C++ exception that aborts the whole process): a non-ASCII
+    # decimal digit int()/str.isdigit() both accept ("١٥", Arabic-Indic 15) and a
+    # multiplier stoi can't hold ("99999999999"). Both must now be rejected
+    # in Python, before any engine call.
+    for bad in ("١٥", "99999999999", "15 ", " 15"):
+        with pytest.raises(ValueError):
+            policy.tf_ms(bad)
+
 def test_forming_bar_open_is_first_print():
     b = builder.FormingBarBuilder("15")
     t0 = 1_577_836_800_000

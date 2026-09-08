@@ -1,4 +1,5 @@
-import asyncio
+import asyncio, csv
+import pytest
 from pineforge_live import types as T
 from pineforge_live.adapters import tape
 from pineforge_live.bars import FormingBarBuilder, compare_bar
@@ -51,3 +52,43 @@ def test_path4_reversed_and_dense_and_random_keep_ohlc():
     r1 = [e.tick.price for e in collect(tape.TapeTickSource(bars(), "15", "random-ohlc", 7).subscribe(T.InstrumentId("X", T.MarketType.PERP, "Y"), 0)) if isinstance(e, T.Tick)]
     r2 = [e.tick.price for e in collect(tape.TapeTickSource(bars(), "15", "random-ohlc", 7).subscribe(T.InstrumentId("X", T.MarketType.PERP, "Y"), 0)) if isinstance(e, T.Tick)]
     assert r1 == r2   # seeded, deterministic
+
+def test_real_tick_policy_requires_ticks_csv():
+    # item 2: failing late (only at subscribe()) with an opaque TypeError
+    # is a bad diagnostic; __init__ must refuse immediately.
+    with pytest.raises(ValueError):
+        tape.TapeTickSource(bars(), "15", "real", ticks_csv=None)
+
+def test_tape_bar_source_rejects_out_of_order_or_duplicate_bars():
+    # item 3: a recorded feed must be strictly increasing by ts_open --
+    # [B1, B0] or [B0, B0] must refuse construction, not produce a
+    # nonsense Gap(from > to).
+    b = bars()
+    with pytest.raises(ValueError):
+        tape.TapeBarSource([b[1], b[0]], "15", tape.TapeClock(0))
+    with pytest.raises(ValueError):
+        tape.TapeBarSource([b[0], b[0]], "15", tape.TapeClock(0))
+
+def test_tape_bar_source_rejects_tf_mismatch():
+    # item 5: `instrument`/`tf` were silently ignored; a caller passing the
+    # wrong tf is a bug worth surfacing, not silently playing the 15m tape.
+    src = tape.TapeBarSource(bars(), "15", tape.TapeClock(0))
+    inst = T.InstrumentId("X", T.MarketType.PERP, "Y")
+    with pytest.raises(ValueError):
+        asyncio.run(src.history(inst, "60", 0, 1))
+    with pytest.raises(ValueError):
+        collect(src.events(inst, "60"))
+
+def test_real_tick_policy_emits_tick_gap_on_seq_discontinuity(tmp_path):
+    # item 9: a seq jump of more than 1 must surface as a TickGap, not pass
+    # silently -- the gap-heal logic (a later task) needs it from the tape too.
+    p = tmp_path / "ticks.csv"
+    with p.open("w", newline="") as fh:
+        w = csv.writer(fh); w.writerow(["ts", "seq", "price", "qty"])
+        for seq, ts, price in [(7, 1000, 100.0), (8, 1001, 100.5), (10, 1003, 101.0)]:
+            w.writerow([ts, seq, price, 1.0])
+    src = tape.TapeTickSource(bars(), "15", "real", ticks_csv=p)
+    events = collect(src.subscribe(T.InstrumentId("X", T.MarketType.PERP, "Y"), 8))
+    kinds = [(type(e).__name__, e.tick.seq if isinstance(e, T.Tick) else (e.from_seq, e.to_seq)) for e in events]
+    assert kinds == [("Tick", 8), ("TickGap", (8, 10)), ("Tick", 10)]
+    assert events[1].healed is False

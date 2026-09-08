@@ -127,7 +127,7 @@ def test_run_full_rejects_bad_script_tf(test_so, test_feed):
         h.lib.strategy_free = counted_free
         live_s = h._s
         try:
-            for bad in ("", "abc", None):
+            for bad in ("", "abc", None, "99999999999", "١٥"):  # F1: process-abort escapes must be rejected here too
                 with pytest.raises(ValueError):
                     h.run_full(bars, bad)
         finally:
