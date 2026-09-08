@@ -132,6 +132,7 @@ def test_trigger_reversed_and_missed_emits_exactly_one_flatten_no_correction():
     assert len(d.corrections) == 1
     c = d.corrections[0]
     assert c.kind == "FLATTEN" and c.side == T.Side.SELL and abs(c.qty - 0.5) < 1e-9
+    assert d.skipped_cycle
 
 def test_missed_ambiguous_entry_qty_clamped_to_shortfall():
     """M4: the correction qty is the SHORTFALL (`ledger - real`), not the
@@ -344,3 +345,74 @@ def test_unreconcilable_sides_escalates_flat_only_hold():
                         ledger_position=-1.0, real_position=1.0, our_signed_fills=1.0))
     assert d.stop == (T.StopLevel.FLAT_ONLY, T.StopDisposition.HOLD, "unreconcilable_sides")
     assert d.corrections == [] and d.counters.get("skipped_position_mismatch") == 1
+
+
+# ---- Task 6 re-review 2 pins (NEW-6 EXIT-branch side, NEW-7 FLATTEN
+# skipped_cycle, NEW-8 both-gates-failed skipped_cycle, NEW-9 SKIPPED
+# cycle blocks a same-decision TOP_UP) ----
+
+def test_missed_exit_representative_agrees_with_the_ledger_side():
+    """NEW-6 (Y4): the EXIT branch's representative must be the first
+    missed exit whose own direction equals the LEDGER's side (mirroring
+    NEW-2's ENTRY-branch fix) -- the pre-fix code gated `basis` against
+    `_missed_side` but took `corr_side` from the unfiltered
+    `missed_exits[0]`, so a same-bar short-close the venue missed, sitting
+    under a *new* long ledger, corrected a wrong-side, ungated BUY away
+    from the ledger. Must hold under NONE and FLAT_ONLY (reduce-only vs.
+    the wrong-side correction is exposure-increasing, but ships un-gated
+    either way pre-fix)."""
+    for level in (T.StopLevel.NONE, T.StopLevel.FLAT_ONLY):
+        d = R.reconcile(inp([cf(C.FillClass.MISSED, leg="EXIT", is_long=False, intent="XS")],
+                            ledger_position=1.0, real_position=1.5, our_signed_fills=1.5, stop_level=level))
+        assert d.corrections == [] and d.counters.get("skipped_position_mismatch") == 1
+
+def test_missed_exit_representative_is_list_order_independent():
+    """NEW-6 (Y3 vs Y3b): the flat-ledger sibling is order-dependent
+    SILENCE, not a wrong order -- three MISSED exits [XS, XL, S], ledger 0,
+    basis +1, must give the IDENTICAL result regardless of list order (the
+    pre-fix `missed_exits[0]` representative flipped the outcome with
+    order: `[XS, XL, S]` -> `skipped_position_mismatch`, `[XL, XS, S]` ->
+    `SELL 1.0`)."""
+    fills = [cf(C.FillClass.MISSED, leg="EXIT", is_long=False, intent="XS"),
+             cf(C.FillClass.MISSED, leg="EXIT", is_long=True, intent="XL"),
+             cf(C.FillClass.MISSED, leg="EXIT", is_long=False, intent="S")]
+    reordered = [fills[1], fills[0], fills[2]]
+    a = R.reconcile(inp(fills, ledger_position=0.0, real_position=1.0, our_signed_fills=1.0))
+    b = R.reconcile(inp(reordered, ledger_position=0.0, real_position=1.0, our_signed_fills=1.0))
+    assert [(c.kind, c.side, c.qty, c.intent) for c in a.corrections] == [(c.kind, c.side, c.qty, c.intent) for c in b.corrections]
+    assert a.corrections[0].kind == "MARKET_CORRECT" and a.corrections[0].side == T.Side.SELL and abs(a.corrections[0].qty - 1.0) < 1e-9
+
+def test_trigger_reversed_flatten_with_a_missed_entry_marks_skipped_cycle():
+    """NEW-7 (Y2/Y12): the FLATTEN early return must not drop the L7/NEW-5
+    `skipped_cycle` marking -- a TRIGGER_REVERSED/ENTRY_SLIP FLATTEN
+    already refuses any MISSED entry the SAME decision found (it would have
+    been refused by this decision's own FLAT_ONLY escalation anyway), so
+    the cycle is SKIPPED, not silently dropped."""
+    d = R.reconcile(inp([cf(C.FillClass.TRIGGER_REVERSED), cf(C.FillClass.ENTRY_SLIP), cf(C.FillClass.MISSED, qty=1.0)],
+                        real_position=0.5, ledger_position=1.0))
+    assert len(d.corrections) == 1
+    c = d.corrections[0]
+    assert c.kind == "FLATTEN" and c.side == T.Side.SELL and abs(c.qty - 0.5) < 1e-9
+    assert d.skipped_cycle
+
+def test_missed_fill_failing_both_gates_with_a_real_gap_marks_skipped_cycle():
+    """NEW-8 (Y5): a MISSED fill that fails BOTH the ENTRY and EXIT gates
+    (X13's `basis == 0` sibling) leaves a real ledger/basis gap unrecorded
+    -- ledger +1, basis 0, one MISSED EXIT XS: the venue is flat while the
+    ledger is long and nothing records it unless the fall-through marks
+    `skipped_cycle` when that gap exceeds the dead-band."""
+    d = R.reconcile(inp([cf(C.FillClass.MISSED, leg="EXIT", is_long=False, intent="XS")],
+                        ledger_position=1.0, real_position=0.0, our_signed_fills=0.0))
+    assert d.corrections == [] and d.counters.get("skipped_position_mismatch") == 1
+    assert d.skipped_cycle
+
+def test_skipped_cycle_from_missed_refusal_blocks_a_same_decision_top_up():
+    """NEW-9 (Y6): X1's fills, but the MISSED correction is refused by
+    [r4] (`missed_distance_bps` beyond `max_missed_entry_distance_bps`) --
+    the decision is marked `skipped_cycle`, and the QTY_DIVERGENT pass over
+    the SAME gap must not bypass that refusal with an exposure-increasing
+    TOP_UP (trims still ship; budget/own-stop refusals are unaffected)."""
+    d = R.reconcile(inp([cf(C.FillClass.MISSED, qty=1.0, intent="L1"), cf(C.FillClass.QTY_DIVERGENT, qty=0.5, intent="L2")],
+                        ledger_position=2.0, real_position=0.5, our_signed_fills=0.5, missed_distance_bps=50.0))
+    assert d.skipped_cycle
+    assert all(c.kind != "TOP_UP" for c in d.corrections)

@@ -88,13 +88,20 @@ class ReconcileDecision:
     are already gated against it -- see `reconcile()`'s docstring).
     `skipped_cycle` marks a decision that journaled `SKIPPED` instead of
     correcting (beyond-bound MISSED, a MISSED refused by the STOP gate or
-    the budget, or a MISSED dropped by the L8 account cross-check -- spec:
+    the budget, a MISSED dropped by the L8 account cross-check, a MISSED
+    that fails both position gates with a real gap (NEW-8), or a FLATTEN
+    that superseded an independent MISSED entry (NEW-7) -- spec:
     "otherwise the cycle is journaled SKIPPED"). `residual_qty`
     accumulates the still-uncorrected QTY_DIVERGENT shortfall/excess
     across every branch that carries rather than corrects, with one
     consistent sign: positive means `our_signed_fills` is SHORT of
     `ledger_position` (an uncorrected top-up), negative means it carries
-    an EXCESS we tolerated (an uncorrected trim). `counters` is a bag of
+    an EXCESS we tolerated (an uncorrected trim). Invariant: this is the
+    SIGNED correction that was NOT issued THIS decision, not
+    `ledger_position - our_signed_fills` outright (a correction may have
+    shipped too); on the opposite-side split path (NEW-3) it is the
+    un-issued TOP_UP leg only -- the REDUCE_ONLY_TRIM half, when it ships,
+    is not reflected here. `counters` is a bag of
     `bump()` tallies for observability/tests -- not spec-normative, just
     named the way the reconciler's own reasoning names its branches."""
     corrections: list[CorrectionRequest] = field(default_factory=list)
@@ -124,22 +131,6 @@ def _escalate(d: ReconcileDecision, level: T.StopLevel, disp: T.StopDisposition,
     cur_level, cur_disp, _ = d.stop
     if stronger((level, disp), (cur_level, cur_disp)):
         d.stop = (level, disp, cause)
-
-def _missed_side(ledger_position: float, e: EmulatedFill) -> int:
-    """+1/-1: the side a MISSED **EXIT** correction's gate compares `basis`
-    (`our_signed_fills`) against -- `sign(ledger_position)`, or, when the
-    ledger is currently flat, the side `e`'s own trade direction implies
-    (the ledger-flat fallback is what makes the H1 "ledger closed, venue
-    never got the close" case correctable at all). The ENTRY branch does
-    NOT use this: there the ledger's side is the only admissible side and
-    a fill that disagrees with it is not a representative (NEW-2).
-    `EmulatedFill.is_long` encodes the TRADE/POSITION direction for BOTH
-    legs (see its docstring), so an ENTRY's own `is_long` and an EXIT's
-    "opposite of the closing order's own side" land on the identical
-    sign -- one formula covers both."""
-    if ledger_position != 0.0:
-        return 1 if ledger_position > 0 else -1
-    return 1 if e.is_long else -1
 
 def _emit_missed_correction(inp: ReconcileInput, d: ReconcileDecision, bump, e: EmulatedFill, *, increases: bool,
                             qty_cap: float, flat_only: bool, band: float, corr_side: T.Side) -> float:
@@ -197,7 +188,18 @@ def _reconcile_missed(inp: ReconcileInput, d: ReconcileDecision, bump, missed_en
     `ledger_position` in magnitude, on that side -- the venue still holds
     what the ledger closed -- and the correction is reduce-only. A
     both-flat MISSED exit (`ledger_position == basis == 0`) matches
-    neither gate and corrects nothing."""
+    neither gate and corrects nothing. NEW-6: mirrors NEW-2 -- the
+    representative is the FIRST exit whose own trade direction equals
+    `side` (`sign(ledger)`, or, when the ledger is flat, `sign(basis)`),
+    and `corr_side` is derived from that validated `side`, never from the
+    unfiltered fill's own `is_long` (an unfiltered representative could
+    gate on the ledger's side while shipping an ungated correction on the
+    fill's own, opposite, side).
+
+    A MISSED fill that fails both the ENTRY and EXIT gates with a real
+    `ledger`/`basis` gap beyond the dead-band (NEW-8) is not a "nothing to
+    do": the caller marks `skipped_cycle` so Task 8 journals it rather
+    than leaving the gap unrecorded."""
     ledger = inp.ledger_position
     if missed_entries:
         side = 1 if ledger > 0 else (-1 if ledger < 0 else 0)
@@ -207,14 +209,16 @@ def _reconcile_missed(inp: ReconcileInput, d: ReconcileDecision, bump, missed_en
             return _emit_missed_correction(inp, d, bump, e, increases=True, qty_cap=abs(ledger) - abs(basis),
                                            flat_only=flat_only, band=band, corr_side=corr_side)
     if missed_exits:
-        e = missed_exits[0].emulated
-        side = _missed_side(ledger, e)
-        if basis != 0.0 and (basis > 0) == (side > 0) and abs(basis) > abs(ledger):
-            corr_side = T.Side.SELL if e.is_long else T.Side.BUY   # reduce-only: opposite of the side still held
+        side = 1 if ledger > 0 else (-1 if ledger < 0 else (1 if basis > 0 else -1))
+        e = next((c.emulated for c in missed_exits if (1 if c.emulated.is_long else -1) == side), None)
+        if e is not None and basis != 0.0 and (basis > 0) == (side > 0) and abs(basis) > abs(ledger):
+            corr_side = T.Side.SELL if side > 0 else T.Side.BUY   # reduce-only: opposite of the validated side, never e.is_long
             return _emit_missed_correction(inp, d, bump, e, increases=False, qty_cap=abs(basis) - abs(ledger),
                                            flat_only=flat_only, band=band, corr_side=corr_side)
     if missed_entries or missed_exits:
         bump("skipped_position_mismatch")
+        if abs(ledger - basis) > band:
+            d.skipped_cycle = True
     return 0.0
 
 def _emit_top_up(inp: ReconcileInput, d: ReconcileDecision, bump, e: EmulatedFill, *, signed: float,
@@ -408,6 +412,13 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
     # gate never catches it (X3/X4). Emitting one ends the decision.
     if need_flatten and inp.real_position != 0.0:
         d.corrections.append(CorrectionRequest("FLATTEN", _side_for(-inp.real_position), abs(inp.real_position), flatten_cause, None))
+        if missed_entries:
+            # NEW-7: the FLATTEN already covers the venue position, but it
+            # must not also drop the L7/NEW-5 SKIPPED marking -- a MISSED
+            # entry found this same decision would have been refused by
+            # this decision's own FLAT_ONLY escalation anyway (a MISSED
+            # exit is covered by the flatten itself).
+            d.skipped_cycle = True; bump("refused_by_own_stop")
         return d
 
     if not account_mismatch:
@@ -416,7 +427,13 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
         # QTY_DIVERGENT pass is handed `basis + issued` so it corrects only
         # the remainder of the same aggregate gap (X1/X2).
         issued = _reconcile_missed(inp, d, bump, missed_entries, missed_exits, basis, band, flat_only)
-        _reconcile_qty_divergent(inp, d, bump, qty_divergent, basis + issued, band, flat_only)
+        # NEW-9: a decision already marked SKIPPED (a MISSED correction
+        # refused by [r4]'s age/distance bound, or NEW-8's both-gates-
+        # failed fall-through) issues no exposure-increasing correction
+        # from the QTY_DIVERGENT pass either -- trims still ship
+        # (reduce-only, ungated); budget/own-stop refusals are unchanged
+        # since the top-up would be refused for the same reason.
+        _reconcile_qty_divergent(inp, d, bump, qty_divergent, basis + issued, band, flat_only or d.skipped_cycle)
     elif missed_entries:
         # NEW-5: a MISSED entry dropped by the account cross-check is a
         # cycle we declined to act on -- say so, so Task 8 journals the
