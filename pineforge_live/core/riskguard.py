@@ -43,6 +43,13 @@ class BreakerTable:
 
 class RateWindow:
     def __init__(self, window_n: int):
+        # N3: a non-positive window builds a `deque(maxlen=0)` that silently
+        # drops every observation -- `n` stays 0, so `alert()`/`breached()`
+        # can never fire and the breaker is a no-op nobody notices. Same
+        # class of config error as `BreakerTable.self_test`'s
+        # `window_n < n_min`, caught at construction for the same reason.
+        if window_n < 1:
+            raise ValueError(f"window_n must be >= 1, got {window_n}")
         self._d: deque[bool] = deque(maxlen=window_n)
         self._x = 0  # n9: running count of True in the window, kept in sync by observe() so x/breached are O(1) instead of a full rescan
     def observe(self, hit: bool) -> None:
@@ -103,6 +110,20 @@ def stronger(a: tuple[T.StopLevel, T.StopDisposition], b: tuple[T.StopLevel, T.S
         return _LEVEL_RANK[al] > _LEVEL_RANK[bl]
     return _DISP_RANK[ad] > _DISP_RANK[bd]
 
+def bounded_disposition(level: T.StopLevel, disposition: T.StopDisposition) -> T.StopDisposition:
+    """m4: a `HARD` stop always carries a bounded hold. `HARD` is the level
+    at which no new order may be sent at all, so a `HARD` raised with
+    disposition `NONE` would sit there with nothing to act on and -- worse
+    -- no `raised_ms`, which is what `hard_stop_max_hold_ms` measures the
+    hold against: the one automatic way out of a HARD stop (`hold_expired`
+    -> flatten, spec 5.5 "HOLD carries hard_stop_max_hold after which the
+    position is flattened") would never become reachable. So `(HARD,
+    NONE)` normalises to `(HARD, HOLD)` on both the raise path and the
+    restore path, in memory and in the durable row alike. Every other pair
+    passes through untouched: `FLAT_ONLY` genuinely has no disposition,
+    and `HOLD`/`FLATTEN` are already bounded/terminal."""
+    return T.StopDisposition.HOLD if (level is T.StopLevel.HARD and disposition is T.StopDisposition.NONE) else disposition
+
 class StopController:
     """The STOP controller (spec §5.5): tracks the current STOP `level`/
     `disposition` and enforces the sidecar sequencing on every raise --
@@ -131,6 +152,7 @@ class StopController:
         self.hard_stop_max_hold_ms = hard_stop_max_hold_ms
         self.raised_ms: int | None = None  # n6: wall-clock ms of the current HARD/HOLD, for hold_expired(); None off HARD/HOLD
     def raise_stop(self, level: T.StopLevel, disposition: T.StopDisposition, cause: str) -> None:
+        disposition = bounded_disposition(level, disposition)   # m4: HARD always holds
         if not stronger((level, disposition), (self.level, self.disposition)):
             return
         try:
@@ -156,7 +178,8 @@ class StopController:
         rank order."""
         open_rows = self.j.rows("stops", "cleared_ms IS NULL", ())
         for r in open_rows:
-            lvl, disp = T.StopLevel(r["level"]), T.StopDisposition(r["disposition"])
+            lvl = T.StopLevel(r["level"])
+            disp = bounded_disposition(lvl, T.StopDisposition(r["disposition"]))   # m4, durable half
             if stronger((lvl, disp), (self.level, self.disposition)):
                 self.level, self.disposition, self.cause = lvl, disp, r["cause"]
                 self.raised_ms = r["created_ms"] if (lvl is T.StopLevel.HARD and disp is T.StopDisposition.HOLD) else None

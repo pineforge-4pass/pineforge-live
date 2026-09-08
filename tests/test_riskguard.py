@@ -237,3 +237,66 @@ def test_riskguard_checks_take_abs():
                                    disagree_twice=2, unexplained_divergence_pct=2.0, liquidation_distance_pct_min=1.0, recompute_ms_p99_max=500))
     assert g.check_position(-3.0, 100.0) == "max_abs_position"
     assert g.check_order_notional(-2, 6e4) == "max_order_notional"
+
+def test_hard_stop_without_a_disposition_normalises_to_hold(tmp_path):
+    """m4 pin: `HARD` is the level at which nothing new may be sent, so it
+    must always carry a bounded hold -- `raise_stop(HARD, NONE, ...)`
+    normalises to `(HARD, HOLD)` (in memory AND in the durable row), which
+    is what starts `raised_ms` and makes `hold_expired()` reachable. A
+    HARD stop with disposition NONE would otherwise sit forever with no
+    disposition to act on and no clock running."""
+    m = StopMarker(tmp_path / "j.stop"); m.prepare(); j = _open(tmp_path, stop_marker=m)
+    sc = RG.StopController(j, m, hard_stop_max_hold_ms=1000)
+    sc.raise_stop(T.StopLevel.HARD, T.StopDisposition.NONE, "hard, no disposition given")
+    assert sc.level == T.StopLevel.HARD and sc.disposition == T.StopDisposition.HOLD
+    assert sc.raised_ms is not None and sc.hold_expired(sc.raised_ms + 1000)
+    assert j.rows("stops", "1=1", ())[-1]["disposition"] == "HOLD"   # the durable row carries the normalised pair
+    # and it is a real escalation: FLATTEN still beats it, HOLD no longer does
+    sc.raise_stop(T.StopLevel.HARD, T.StopDisposition.HOLD, "same pair")
+    assert len(j.rows("stops", "1=1", ())) == 1
+    j.close()
+
+def test_restore_normalises_a_hard_none_row_to_hold(tmp_path):
+    """m4, the durable half: a `(HARD, NONE)` row written by an older
+    incarnation (or by any path that bypassed `raise_stop`) comes back as
+    `(HARD, HOLD)` with its hold clock running, not as a dispositionless
+    HARD."""
+    m = StopMarker(tmp_path / "j.stop"); m.prepare(); j = _open(tmp_path, stop_marker=m)
+    j.append_stop(T.StopLevel.HARD.value, T.StopDisposition.NONE.value, "legacy row")
+    j.close()
+    j2 = _open(tmp_path, stop_marker=None)
+    sc = RG.StopController(j2, m, hard_stop_max_hold_ms=1000); sc.restore()
+    assert sc.level == T.StopLevel.HARD and sc.disposition == T.StopDisposition.HOLD and sc.raised_ms is not None
+    j2.close()
+
+def test_restore_rederives_raised_ms_from_the_journal_row(tmp_path):
+    """N4 pin: the hold clock is durable. After a restart, `restore()`
+    re-derives `raised_ms` from the open `stops` row's own `created_ms`,
+    so `hold_expired()` measures the hold from when it was actually
+    raised -- a process that crashes and comes back does not silently
+    restart the `hard_stop_max_hold_ms` countdown."""
+    m = StopMarker(tmp_path / "j.stop"); m.prepare(); j = _open(tmp_path, stop_marker=m)
+    sc = RG.StopController(j, m, hard_stop_max_hold_ms=1000)
+    sc.raise_stop(T.StopLevel.HARD, T.StopDisposition.HOLD, "manual")
+    raised = j.rows("stops", "cleared_ms IS NULL", ())[-1]["created_ms"]
+    assert sc.raised_ms == raised
+    j.close()
+
+    j2 = _open(tmp_path, stop_marker=None)          # the marker is still set: the operator recovery path
+    sc2 = RG.StopController(j2, m, hard_stop_max_hold_ms=1000)
+    assert sc2.raised_ms is None                     # nothing restored yet
+    sc2.restore()
+    assert sc2.raised_ms == raised                   # ... the ORIGINAL raise time, not "now"
+    assert not sc2.hold_expired(raised + 999) and sc2.hold_expired(raised + 1000)
+    j2.close()
+
+def test_rate_window_rejects_a_window_smaller_than_one():
+    """N3 pin: `RateWindow(0)` would build a `deque(maxlen=0)` that drops
+    every observation -- `n` stays 0, `rate()` stays 0.0, and the breaker
+    silently never fires. A non-positive window is a config error, so it
+    is refused at construction."""
+    with pytest.raises(ValueError):
+        RG.RateWindow(0)
+    with pytest.raises(ValueError):
+        RG.RateWindow(-1)
+    assert RG.RateWindow(1).n == 0                   # 1 is the smallest window that can observe anything
