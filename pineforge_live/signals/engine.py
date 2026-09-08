@@ -13,6 +13,9 @@ from dataclasses import asdict, dataclass
 from pineforge_live import types as T
 from pineforge_live.bars.builder import bars_hash_all
 from pineforge_live.bars.policy import tf_ms
+from pineforge_live.bars.minute import validate_minute
+from pineforge_live.bars.minute_stream import MinuteStream
+from pineforge_live.bars.builder import compare_bar
 from pineforge_live.core.book import book_diff
 from pineforge_live.core.classify import emulated_from_settle, _side_for_leg, CLOSE_CAUSE_NAMES
 from pineforge_live.core.ledger import Ledger, RecomputeAborted
@@ -91,12 +94,22 @@ class SignalEngine:
         self.last_eval_ms = None
         self.forming_from_ticks=False
         self.last_tick=None
+        self.input_state=None
+        self.last_input_minute=None
         journal.con.executescript('''
 CREATE TABLE IF NOT EXISTS signal_checkpoints(
  epoch_hash TEXT PRIMARY KEY, bar_index INTEGER NOT NULL, config_hash TEXT NOT NULL,
  payload_json TEXT NOT NULL, checksum TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS signal_input_minutes(
+ epoch_hash TEXT NOT NULL, ts_open INTEGER NOT NULL,
+ payload_json TEXT NOT NULL, checksum TEXT NOT NULL,
+ PRIMARY KEY(epoch_hash,ts_open));
 ''')
-        journal.append_epoch(self.epoch, _canonical(asdict(spec)))
+        epoch_document=asdict(spec)
+        if epoch_document.get('chart_timezone') is None:epoch_document.pop('chart_timezone',None)
+        if epoch_document.get('parent_windows') is None:
+            epoch_document.pop('parent_windows',None)  # Keep existing unscheduled journal identities.
+        journal.append_epoch(self.epoch, _canonical(epoch_document))
         journal.append_runtime_config(self.config_hash, _canonical({'strategy_name':strategy_name,'mode':mode,'message':message}))
 
     def _check(self):
@@ -132,10 +145,46 @@ CREATE TABLE IF NOT EXISTS signal_checkpoints(
                               'last_eval_ms':self.last_eval_ms,
                               'forming_from_ticks':self.forming_from_ticks,
                               'last_tick':asdict(self.last_tick) if self.last_tick else None,
+                              'input_state':self.input_state,
+                              'last_input_minute':asdict(self.last_input_minute) if self.last_input_minute else None,
                               'bars_hash':self.ledger.bars_hash,'broker_hash':self.ledger.last.hashes[-1]})
         fields = [self.epoch, self.ledger.n - 1, self.config_hash, payload]
         self.j._exec('INSERT OR REPLACE INTO signal_checkpoints VALUES(?,?,?,?,?)',
                      (*fields, T.canonical_sha256(fields)))
+
+    def _capture_input(self, input_state=None, input_minute=None):
+        """Store consumed input in the same transaction as its decision/outbox."""
+        if input_state is None:
+            if input_minute is not None:
+                raise ValueError('input minute requires aggregation checkpoint')
+            return
+        stream = MinuteStream.from_state(input_state,parent_windows=self.ledger.calendar)
+        if stream.aggregator.script_tf != self.spec.script_tf:
+            raise ValueError('input checkpoint timeframe mismatch')
+        calendar_sha=stream.aggregator.calendar.sha256 if stream.aggregator.calendar else None
+        if calendar_sha != (self.ledger.calendar.sha256 if self.ledger.calendar else None):
+            raise ValueError('input checkpoint calendar mismatch')
+        forming = stream.forming()
+        if ((forming is None) != (self.forming is None)
+                or (forming is not None and compare_bar(forming,self.forming))):
+            raise ValueError('input checkpoint forming bar mismatch')
+        if input_minute is None and stream.last_input != self.last_input_minute:
+            raise ValueError('input checkpoint advanced without a consumed minute')
+        if input_minute is not None:
+            validate_minute(input_minute)
+            if stream.last_input != input_minute:
+                raise ValueError('input checkpoint last minute mismatch')
+            payload = _canonical(asdict(input_minute))
+            domain = [self.epoch,input_minute.ts_open,payload]
+            existing = self.j._exec('SELECT payload_json,checksum FROM signal_input_minutes WHERE epoch_hash=? AND ts_open=?',
+                                    (self.epoch,input_minute.ts_open)).fetchone()
+            if existing is not None:
+                if existing['payload_json'] != payload or existing['checksum'] != T.canonical_sha256(domain):
+                    raise SignalRecoveryRequired('input minute identity conflict')
+            else:
+                self.j._exec('INSERT INTO signal_input_minutes VALUES(?,?,?,?)',(*domain,T.canonical_sha256(domain)))
+            self.last_input_minute = input_minute
+        self.input_state = json.loads(_canonical(input_state))
 
     def _authorize_commit(self):
         if self.authority is not None and self.authority() is False:
@@ -168,7 +217,9 @@ CREATE TABLE IF NOT EXISTS signal_checkpoints(
         if history[0].ts_open != self.spec.history_start_ms:
             raise ValueError('history must begin at epoch.history_start_ms')
         width = tf_ms(self.spec.script_tf)
-        if any(b.is_forming for b in history) or any(b.ts_open != a.ts_open + width for a,b in zip(history,history[1:])):
+        if self.ledger.calendar is not None:
+            self.ledger.calendar.validate_prefix(history)
+        if any(b.is_forming for b in history) or (self.ledger.calendar is None and any(b.ts_open != a.ts_open + width for a,b in zip(history,history[1:]))):
             raise ValueError('warmup history must contain contiguous confirmed script bars')
         row = self._row()
         if row is None and self.j.last_settlement(self.epoch) is not None:
@@ -196,6 +247,25 @@ CREATE TABLE IF NOT EXISTS signal_checkpoints(
                     if tick:
                         tick['side']=T.Side(tick['side']) if tick.get('side') else None
                     self.last_tick=T.NormalizedTick(**tick) if tick else None
+                    self.input_state=state.get('input_state')
+                    raw_minute=state.get('last_input_minute')
+                    self.last_input_minute=T.NormalizedBar(**raw_minute) if raw_minute else None
+                    if self.input_state is not None:
+                        stream=MinuteStream.from_state(self.input_state,parent_windows=self.ledger.calendar)
+                        restored=stream.forming()
+                        if (stream.aggregator.script_tf != self.spec.script_tf
+                                or (stream.aggregator.calendar.sha256 if stream.aggregator.calendar else None)!=(self.ledger.calendar.sha256 if self.ledger.calendar else None)
+                                or stream.last_input != self.last_input_minute
+                                or (restored is None) != (self.forming is None)
+                                or (restored is not None and compare_bar(restored,self.forming))):
+                            raise JournalCorrupt('signal minute checkpoint mismatch')
+                        if self.last_input_minute is not None:
+                            raw=_canonical(asdict(self.last_input_minute))
+                            identity=[self.epoch,self.last_input_minute.ts_open,raw]
+                            saved=self.j._exec('SELECT payload_json,checksum FROM signal_input_minutes WHERE epoch_hash=? AND ts_open=?',
+                                               identity[:2]).fetchone()
+                            if saved is None or saved['payload_json'] != raw or saved['checksum'] != T.canonical_sha256(identity):
+                                raise JournalCorrupt('signal minute identity checkpoint mismatch')
                 else:
                     self._save()
             self.ready = True
@@ -234,7 +304,7 @@ CREATE TABLE IF NOT EXISTS signal_checkpoints(
         self.outbox.enqueue(event_id,payload,now_ms)
         return event_id
 
-    def settle(self, bar, now_ms):
+    def settle(self, bar, now_ms, *, input_state=None, input_minute=None):
         self._check()
         if not self.ready:
             raise SignalRecoveryRequired('seed first')
@@ -274,6 +344,7 @@ CREATE TABLE IF NOT EXISTS signal_checkpoints(
                 if self.forming and self.forming.ts_open <= bar.ts_open:
                     self.forming=None
                     self.forming_from_ticks=False
+                self._capture_input(input_state,input_minute)
                 self._save()
             return SignalResult(tuple(emitted),result.bar_index,recompute_ms=result.recompute_ms)
         except RecomputeAborted:
@@ -282,13 +353,14 @@ CREATE TABLE IF NOT EXISTS signal_checkpoints(
             self._fail(exc)
             raise
 
-    def evaluate(self, forming, now_ms, *, last_seq=None, from_ticks=False, last_tick=None):
+    def evaluate(self, forming, now_ms, *, last_seq=None, from_ticks=False, last_tick=None,
+                 input_state=None, input_minute=None):
         self._check()
         if not self.ready:
             raise SignalRecoveryRequired('seed first')
         self._horizon()
         width=tf_ms(self.spec.script_tf)
-        if not forming.is_forming or forming.ts_open != self.ledger.last.bar.ts_open + width:
+        if not forming.is_forming or forming.ts_open != self.ledger.next_open():
             raise ValueError('forming bar must immediately follow the confirmed ledger')
         try:
             staged=_StagedJournal(self.j)
@@ -328,17 +400,19 @@ CREATE TABLE IF NOT EXISTS signal_checkpoints(
                 if last_seq is not None:
                     self.last_seq=last_seq
                 self.last_eval_ms=now_ms
+                self._capture_input(input_state,input_minute)
                 self._save()
             return SignalResult(tuple(emitted),self.ledger.n,recompute_ms=pr.recompute_ms if pr else 0)
         except BaseException as exc:
             self._fail(exc)
             raise
 
-    def observe(self, forming, now_ms, *, last_seq=None, from_ticks=False, last_tick=None):
+    def observe(self, forming, now_ms, *, last_seq=None, from_ticks=False, last_tick=None,
+                input_state=None, input_minute=None):
         """Persist a coalesced forming snapshot without generating alerts."""
         self._check()
         self._horizon()
-        if not self.ready or forming.ts_open != self.ledger.last.bar.ts_open + tf_ms(self.spec.script_tf):
+        if not self.ready or forming.ts_open != self.ledger.next_open():
             raise ValueError('observation must follow the confirmed ledger')
         try:
             with self.j.transaction():
@@ -351,6 +425,7 @@ CREATE TABLE IF NOT EXISTS signal_checkpoints(
                 self.forming_from_ticks=from_ticks
                 if last_tick is not None:self.last_tick=last_tick
                 if last_seq is not None:self.last_seq=last_seq
+                self._capture_input(input_state,input_minute)
                 self._save()
             return SignalResult((),self.ledger.n)
         except BaseException as exc:

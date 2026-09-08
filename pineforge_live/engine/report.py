@@ -10,6 +10,9 @@ class TradeRow:
     pnl: float; pnl_pct: float; is_long: bool; qty: float; commission: float
     entry_bar_index: int; exit_bar_index: int; open_at_end: bool
     entry_id: str; exit_id: str; exit_comment: str; close_cause: int
+    max_runup: float = 0.0
+    max_drawdown: float = 0.0
+    entry_incarnation: int = 0
 
 @dataclass
 class RunResult:
@@ -61,7 +64,8 @@ def collect(lib: ctypes.CDLL, s: ctypes.c_void_p, rep: abi.ReportC, layout) -> R
                                    bool(t.open_at_end), _s(lib.strategy_closed_trade_entry_id(s, i)),
                                    _s(lib.strategy_closed_trade_exit_id(s, i)),
                                    _s(lib.strategy_closed_trade_exit_comment(s, i)),
-                                   lib.strategy_closed_trade_close_cause(s, i)))
+                                   lib.strategy_closed_trade_close_cause(s, i),t.max_runup,t.max_drawdown,
+                                   lib.strategy_closed_trade_entry_incarnation(s,i)))
     hashes = [int(rep.broker_state_hash[i]) for i in range(rep.broker_state_hash_len)] if status == 0 else []
     size, fields = layout
     pending = []

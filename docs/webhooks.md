@@ -52,6 +52,9 @@ Copy [signal-config.json](../examples/signal-config.json) and set these fields:
 | `history_path` | Contiguous confirmed bars used to initialize the strategy |
 | `journal_path` | A persistent SQLite file for decisions and webhook delivery |
 | `script_tf` | The strategy timeframe, such as `"15"` or `"1D"` |
+| `input_tf` | Defaults to `script_tf`; use `"1"` for minute input when `script_tf > 1m` |
+| `input_mode` | With minute input: `"bars"`, `"ticks"`, or the default `"mixed"` |
+| `parent_windows_path` | Optional calendar JSON for minute input: ordered `{open_ms,close_ms}` windows |
 | `instrument` | Your data source name, market type and symbol |
 | `syminfo` | Metadata matching the instrument used to compile/test the strategy |
 | `inputs`, `overrides` | Ordered string key/value pairs applied to the engine |
@@ -71,7 +74,9 @@ timestamp,open,high,low,close,volume
 ```
 
 `timestamp` is the bar's opening time in Unix milliseconds. History contains
-confirmed bars at `script_tf`, in chronological order without gaps. It warms
+confirmed bars at `script_tf`, in chronological order without gaps. With an
+explicit calendar, history must match its window-opening prefix, including
+any declared gaps between sessions. It warms
 up the engine; starting a new journal does not send past history's orders.
 On restart, keep the same journal and the same historical prefix so the
 runtime can verify and restore its checkpoint.
@@ -128,6 +133,29 @@ follow the latest confirmed bar. Tick sequence numbers must be contiguous (`last
 be replayed on reconnect. A sequence hole is an unhealed gap and stops the
 runner. `trade_count` is optional on
 bars and defaults to zero.
+
+With `input_tf: "1"` and a higher `script_tf`, `bar` messages contain confirmed
+1m bars. `forming` messages are refused in this mode: the runtime constructs
+the parent forming bar itself. `input_mode: "bars"` accepts those bars and
+refuses ticks. `input_mode: "ticks"` requires positive-quantity ticks before
+every positive-volume minute boundary, verifies the boundary against the
+observed ticks, and consumes the reconstructed minute. Zero-volume minutes
+send only a confirmed boundary carrying their quote OHLCV. `"mixed"` allows
+either representation; select strict modes for independent verification.
+
+The parent opens at its first positive-volume minute's open, falling back to
+its first minute when all volume is zero. HLC includes supplied empty-minute
+quotes; volume is summed and rounded to six decimals. Every final constituent
+minute closes the parent immediately. Minute input, aggregation state and
+resulting events share one atomic checkpoint. Replayed unchanged minute rows
+are skipped; changed rows or missing minutes stop processing.
+
+An optional `parent_windows_path` contains a nonempty array of ordered,
+nonoverlapping, minute-aligned `{open_ms,close_ms}` objects. It supplies session
+boundaries without supplying prices. Include warmup history and future
+windows; gaps between windows are permitted, holes within them are refused,
+and schedule exhaustion stops new input. The exact schedule is part of the
+epoch identity. See the [minute-input and mock-feed examples](../README.md#trade-from-ticks-or-1m-ohlcv).
 
 Other source configurations are:
 
@@ -327,3 +355,8 @@ files. Relative source paths stay relative in deployment identity, so moving
 a configuration tree together with its journal preserves IDs and resumes
 without replaying actions. Keep the stored webhook URL unchanged for queue
 recovery. Volume-only forming updates participate in the evaluation cadence.
+
+`chart_timezone` optionally sets the chart clock independently of
+`syminfo.timezone` (the exchange clock). Omission preserves the existing
+exchange-clock default; an empty string selects the engine's UTC chart path.
+Keep the same setting in the corresponding backtest.

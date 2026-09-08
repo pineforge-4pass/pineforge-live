@@ -74,6 +74,6 @@ def test_tape_smoke_bars_must_be_a_positive_integer(tmp_path):
 
 def test_engine_info_and_tape_smoke(test_so, test_feed):
     r = run("engine-info", str(test_so))
-    assert r.returncode == 0 and "abi 4" in r.stdout and "exports 24/24" in r.stdout, r.stderr
+    assert r.returncode == 0 and "abi 4" in r.stdout and "exports 25/25" in r.stdout, r.stderr
     r = run("tape-smoke", str(test_so), str(test_feed), "--bars", "300")
     assert r.returncode == 0 and r.stdout.strip().startswith("settled 300 bars"), r.stderr

@@ -22,6 +22,8 @@ use the engine's forming-bar probe and are explicitly provisional.
 
 - `run`: consume JSONL, stdin, HTTP polling or a generic WebSocket feed.
 - `check`: process one JSONL/HTTP snapshot and exit, suitable for cron.
+- `mock-feed`: convert original 1m OHLCV into direct minute bars or deterministic
+  tick paths, using the same input contract as `run`.
 - One `order_action` webhook per engine fill, with symbol, side, quantity,
   reference price, Pine order id, bar and strategy identity.
 - Durable SQLite decisions and ordered webhook delivery, including restart
@@ -136,6 +138,127 @@ same shape. No provider-specific subscriptions or credentials are built in.
 
 See [the full feed and webhook contract](docs/webhooks.md) for source settings,
 retry behavior, signing, provisional signals and receiver integration.
+
+## Trade from ticks or 1m OHLCV
+
+For a strategy running above 1m, add these fields to your configuration:
+
+```json
+{
+  "script_tf": "15",
+  "input_tf": "1",
+  "input_mode": "bars",
+  "trigger_mode": "settled"
+}
+```
+
+Keep `history_path` in the strategy timeframe: a 15m strategy warms up from
+confirmed 15m history. Send new confirmed 1m bars starting immediately after
+that history. The runner updates the forming 15m candle after each minute and
+settles it immediately when its final minute closes. The C++ engine then
+produces the order actions delivered to your webhook.
+
+Choose `input_mode: "ticks"` for a trade stream. Send positive-quantity ticks
+and a confirmed 1m `bar` boundary for each minute. The runner verifies the
+boundary against the received ticks and aggregates their OHLCV. Every minute
+with positive volume must contain ticks; a missing whole minute cannot be
+replaced silently by its boundary. A zero-volume minute sends only its `bar`
+boundary. This lets quiet periods close without inventing trades.
+
+Aggregation uses the campaign chart-feed rule: open is the first minute with
+positive volume, or the first minute's open when the parent has none. High,
+low and close include every supplied minute, including zero-volume quotes;
+volume is summed and rounded to six decimals. Missing minutes are refused.
+Each consumed minute, forming state, decision and webhook is committed
+atomically. Identical replayed minutes are idempotent; changed rows stop the
+runtime. Tick sequences must remain contiguous across restart.
+
+Omitting `input_tf` preserves the original script-timeframe bar/tick contract.
+`input_mode: "mixed"` is the default for compatibility; use the explicit
+`bars` or `ticks` mode when verifying either input independently.
+
+## Replay your own 1m data
+
+`mock-feed` reads the original six-column CSV without a broker connection or
+strategy execution:
+
+```csv
+timestamp,open,high,low,close,volume
+1788912000000,2500,2505,2498,2502,12
+1788912060000,2502,2508,2501,2506,9
+```
+
+Generate either input from the same minute file:
+
+```sh
+pineforge-live mock-feed minutes.csv --input-mode bars --output minutes.jsonl
+pineforge-live mock-feed minutes.csv --input-mode ticks --policy high-first --output ticks-high.jsonl
+pineforge-live mock-feed minutes.csv --input-mode ticks --policy low-first --output ticks-low.jsonl
+```
+
+Use `source: {"kind":"jsonl","path":"minutes.jsonl"}` and `input_mode: "bars"`
+in a complete configuration, or point it to a tick file and select `"ticks"`.
+Then run it normally:
+
+```sh
+pineforge-live run --config signals.json
+```
+
+For stdin, configure `source: {"kind":"stdin"}` and pipe the mock stream:
+
+```sh
+pineforge-live mock-feed minutes.csv --input-mode ticks --policy high-first |
+  pineforge-live run --config signals-stdin.json
+```
+
+Each positive-volume minute produces O→H→L→C or O→L→H→C ticks with the exact
+minute OHLC and total volume, followed by its original minute boundary.
+`--policy seeded --seed 7` chooses a repeatable path per minute. Synthetic
+paths are test inputs; 1m OHLCV cannot reveal the historical tick order.
+Settled parent results should agree across both paths for the same engine,
+settings and complete bars; provisional intrabar actions can differ.
+
+Use `--start-ms` (inclusive) and `--end-ms` (exclusive) to select the new input
+after warmup. `--start-seq` sets the first generated tick sequence. Output
+files must be new paths and are published only after successful validation.
+Use separate journals/configurations for independent replay lanes. Keep the
+same file, seed, sequence origin and journal when testing restart recovery.
+An incomplete final parent remains forming and emits no settled-bar action.
+
+## Exchange sessions and daily candles
+
+UTC bucket alignment is the default. For sessions, holidays, daylight-saving
+changes or daily candles with another boundary, provide a price-independent
+calendar JSON and add `parent_windows_path: "calendar.json"` to an
+`input_tf: "1"` configuration:
+
+```json
+[
+  {"open_ms":1788912000000,"close_ms":1788935400000},
+  {"open_ms":1788998400000,"close_ms":1789021800000}
+]
+```
+
+Windows must be ordered, nonoverlapping and minute-aligned. Include the entire
+warmup-history prefix and the sessions to run; each historical script bar
+must match its window's opening timestamp. Minutes outside those windows are
+refused. Gaps between sessions are permitted; missing minutes inside a session
+are refused. Each parent closes at its declared `close_ms`, even when the
+session is shorter than the nominal strategy timeframe.
+
+Pass the same calendar to `mock-feed --parent-windows calendar.json`. Its
+tick sequence continues across session gaps. The schedule is bound into the
+deployment identity; compact checkpoints reference its digest. Exhausting a
+finite schedule stops new input. Supply an adequate future calendar before
+starting a deployment. A replay calendar derived from reference timestamps
+must be described as such when reporting verification.
+
+Your webhook receiver owns broker routing, order submission and execution
+acknowledgments. Start with the included receiver or your paper-trading
+bridge, confirm the emitted symbol/side/quantity sequence, then point the
+configured webhook at your trading bridge. Use receiver-side `event_id`
+deduplication before order submission. Successful webhook delivery and actual
+broker fills are separate outcomes.
 
 ## Webhook events
 

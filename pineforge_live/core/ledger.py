@@ -6,6 +6,7 @@ from typing import Any, TYPE_CHECKING
 from pineforge_live import types as T
 from pineforge_live.bars.builder import bars_hash as roll_hash, compare_bar
 from pineforge_live.bars.policy import tf_ms
+from pineforge_live.bars.calendar import ParentWindows
 from pineforge_live.engine.report import RunResult, TradeRow
 from pineforge_live.journal import JournalConflict
 from .ids import TradeKey, trade_keys, keys_sha256
@@ -167,12 +168,24 @@ class Ledger:
         `runtime_config_hash` the runtime-config identity journaled
         alongside every settlement."""
         self.h, self.spec, self.j, self.rc_hash = handle, spec, journal, runtime_config_hash
+        windows=getattr(spec,'parent_windows',None)
+        self.calendar=ParentWindows(windows) if windows is not None else None
         self.bars: list[T.NormalizedBar] = []; self.bars_hash = 0; self.last: SettleResult | None = None
 
     @property
     def n(self) -> int:
         """Number of bars the ledger has settled so far (0 before `seed()`)."""
         return len(self.bars)
+
+    def next_open(self):
+        if self.last is None:
+            raise RuntimeError('seed before requesting next bar')
+        if self.calendar is not None:
+            return self.calendar.next_open(self.last.bar.ts_open)
+        return self.last.bar.ts_open+tf_ms(self.spec.script_tf)
+
+    def bar_close(self,open_ms):
+        return self.calendar.close(open_ms) if self.calendar is not None else open_ms+tf_ms(self.spec.script_tf)
 
     def _run(self, bars: list[T.NormalizedBar]) -> tuple[RunResult, float]:
         """Runs the engine over `bars` from a fresh recompute and raises
@@ -335,6 +348,8 @@ class Ledger:
         if not history:
             raise ValueError("seed needs at least one bar")
         bars = list(history)
+        if self.calendar is not None:
+            self.calendar.validate_prefix(bars)
         bh = 0
         for b in bars:
             bh = roll_hash(bh, b)
@@ -422,7 +437,7 @@ class Ledger:
                     raise BarsDivergence(f"revised settled bar {bar.ts_open}: {diff}")
             raise ValueError(f"bar {bar.ts_open} is not after the ledger's last bar")
 
-        expected = last_bar.ts_open + tf_ms(self.spec.script_tf)
+        expected = self.next_open()
         if bar.ts_open != expected:
             # bar.is_forming is already ruled out above (N3): this is
             # always the non-forming, non-contiguous case now.

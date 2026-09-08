@@ -1,0 +1,22 @@
+# Submit ONLY a context produced by package_review.py --live-context.
+# Supply the Python image by immutable digest and a unique review image tag.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file=cloudrun/Dockerfile
+      - --build-arg=PYTHON_IMAGE=${_PYTHON_IMAGE}
+      - --build-arg=LIVE_COMMIT=${_LIVE_COMMIT}
+      - --tag=${_IMAGE}
+      - .
+images:
+  - ${_IMAGE}
+timeout: 1200s
+options:
+  logging: CLOUD_LOGGING_ONLY
+  dynamicSubstitutions: true
+substitutions:
+  # Required: python:3.12-slim-bookworm@sha256:<resolved immutable digest>.
+  _PYTHON_IMAGE: ''
+  _LIVE_COMMIT: ''
+  _IMAGE: asia-east1-docker.pkg.dev/$PROJECT_ID/pineforge-cloudrun/pineforge-live-review:$BUILD_ID

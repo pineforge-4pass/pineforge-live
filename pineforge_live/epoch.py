@@ -7,6 +7,7 @@ from pineforge_live import ADAPTER_API_VERSION
 from pineforge_live import types as T
 from pineforge_live.bars.policy import BAR_POLICY_VERSION, tf_ms
 from pineforge_live.types import canonical_sha256
+from pineforge_live.bars.calendar import normalize_windows
 
 @dataclass(frozen=True)
 class CodeIdentity:
@@ -65,6 +66,11 @@ class EpochSpec:
     run, never appended to `setter_log`, so `apply_epoch()`'s
     `setter_log == setter_sequence()` invariant survives any number of
     probe/evaluate calls.
+
+    `chart_timezone` is separate from the exchange's `syminfo.timezone`.
+    Absence retains the original behavior of using the exchange timezone
+    for both setters. An empty string explicitly chooses the engine's UTC
+    chart-time fast path without changing exchange/session calculations.
     """
     venue: str; instrument: T.InstrumentId; script_tf: str; history_start_ms: int; horizon_bars: int
     code_identity: CodeIdentity; syminfo: T.EngineSyminfo; reference_tape_sha256: str
@@ -76,11 +82,23 @@ class EpochSpec:
     realtime_tail: bool = True; probe_suppress_tail_logic: bool = True
     path_order_policy: str = "AUTO+OTHER"; trail_refresh_policy: str = "bar_open_level"
     trade_start_ms: int | None = None
+    parent_windows: tuple[tuple[int,int], ...] | None = None
+    chart_timezone: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "inputs", tuple(tuple(kv) for kv in self.inputs))
         object.__setattr__(self, "overrides", tuple(tuple(kv) for kv in self.overrides))
         tf_ms(self.script_tf)  # F6: reject an epoch that can never run, where it is built
+        if self.chart_timezone is not None:
+            if not isinstance(self.chart_timezone, str) or '\x00' in self.chart_timezone:
+                raise ValueError('chart_timezone must be a string or None')
+            # Absence keeps the original exchange-timezone setter and hash.
+            # An explicitly equal value is the same configuration; empty is
+            # distinct and requests the engine's UTC chart-time fast path.
+            if self.chart_timezone == self.syminfo.timezone:
+                object.__setattr__(self, "chart_timezone", None)
+        object.__setattr__(self, "parent_windows", normalize_windows(self.parent_windows))
+        object.__setattr__(self, "_parent_windows_sha256", canonical_sha256(self.parent_windows) if self.parent_windows is not None else None)
 
     def setter_sequence(self) -> list[tuple[str, tuple]]:
         """The exact ordered sequence of `strategy_set_*` calls
@@ -113,7 +131,8 @@ class EpochSpec:
         sequence deliberately does NOT apply.
         """
         s = self.syminfo
-        seq: list[tuple[str, tuple]] = [("set_chart_timezone", (s.timezone,)), ("set_syminfo_timezone", (s.timezone,)),
+        chart_timezone = s.timezone if self.chart_timezone is None else self.chart_timezone
+        seq: list[tuple[str, tuple]] = [("set_chart_timezone", (chart_timezone,)), ("set_syminfo_timezone", (s.timezone,)),
                                         ("set_syminfo_session", (s.session,)), ("set_syminfo_type", (s.type,))]
         for key in ("ticker", "tickerid", "currency", "basecurrency", "description", "volumetype"):
             value = getattr(s, key)
@@ -142,14 +161,17 @@ class EpochSpec:
         them are actually applied -- see `setter_sequence()`'s
         docstring), bar/adapter policy versions, the syminfo hash and
         the reference tape sha."""
-        return canonical_sha256({
+        identity = {
             "setter_sequence": self.setter_sequence(), "venue": self.venue, "instrument": self.instrument.key(),
             "input_tf_eq_script_tf": True, "script_tf": self.script_tf, "history_start": self.history_start_ms,
             "horizon_bars": self.horizon_bars, "code_identity": asdict(self.code_identity),
             "realtime_tail": self.realtime_tail, "probe_suppress_tail_logic": self.probe_suppress_tail_logic,
             "path_order_policy": self.path_order_policy, "trail_refresh_policy": self.trail_refresh_policy,
             "bar_policy_version": BAR_POLICY_VERSION, "adapter_api_version": ADAPTER_API_VERSION,
-            "engine_syminfo_hash": self.syminfo.hash(), "reference_tape_sha256": self.reference_tape_sha256})
+            "engine_syminfo_hash": self.syminfo.hash(), "reference_tape_sha256": self.reference_tape_sha256}
+        if self.parent_windows is not None:
+            identity['parent_windows_sha256'] = self._parent_windows_sha256
+        return canonical_sha256(identity)
 
 def apply_epoch(handle, spec: EpochSpec) -> list[tuple[str, tuple]]:
     """Configure `handle` for a live epoch: clear its setter log, replay

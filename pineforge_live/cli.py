@@ -12,6 +12,39 @@ def cmd_version(_):
     return 0
 
 
+def cmd_mock_feed(a):
+    """Generate generic minute events; stdout can feed the existing run CLI."""
+    import json,os,tempfile
+    from pineforge_live.adapters.mock_feed import mock_events
+    from pineforge_live.bars.calendar import ParentWindows
+    from pineforge_live.config import read_json
+    windows=ParentWindows(read_json(a.parent_windows)) if a.parent_windows else None
+    events=mock_events(a.feed,mode=a.input_mode,policy=a.policy,seed=a.seed,start_seq=a.start_seq,
+                       start_ms=a.start_ms,end_ms=a.end_ms,parent_windows=windows)
+    def write(stream):
+        for event in events:
+            stream.write(json.dumps(event,sort_keys=True,separators=(',',':'),allow_nan=False)+'\n')
+    if a.output is None or str(a.output)=='-':
+        write(sys.stdout)
+        return 0
+    target=a.output.resolve()
+    if target.exists():raise ValueError('mock feed output already exists; choose a new path')
+    target.parent.mkdir(parents=True,exist_ok=True)
+    temporary=None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=target.parent,
+                                         prefix='.'+target.name+'.',suffix='.tmp',delete=False) as stream:
+            temporary=Path(stream.name)
+            write(stream)
+            stream.flush();os.fsync(stream.fileno())
+        # Publish only complete validated output, without overwriting a file
+        # another process created after the initial existence check.
+        os.link(temporary,target)
+    finally:
+        if temporary is not None:temporary.unlink(missing_ok=True)
+    return 0
+
+
 def cmd_engine_info(a):
     """Print the engine .so's ABI version, `pf_version_string`, export
     coverage, and pending-order field layout."""
@@ -229,6 +262,18 @@ def main(argv=None) -> int:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("version", help="print the CLI/adapter-api/bar-policy version line").set_defaults(fn=cmd_version)
+
+    s=sub.add_parser('mock-feed',help='generate direct 1m or synthetic tick JSONL from original 1m OHLCV')
+    s.add_argument('feed',type=Path,help='original timestamp,open,high,low,close,volume 1m CSV')
+    s.add_argument('--input-mode',choices=('ticks','bars'),default='ticks')
+    s.add_argument('--policy',choices=('high-first','low-first','seeded'),default='high-first')
+    s.add_argument('--seed',type=int,default=0)
+    s.add_argument('--start-seq',type=_positive_int,default=1)
+    s.add_argument('--start-ms',type=int,help='inclusive first minute; begin immediately after warmup history')
+    s.add_argument('--end-ms',type=int,help='exclusive minute bound')
+    s.add_argument('--parent-windows',type=Path,help='same price-independent calendar JSON used by the runtime')
+    s.add_argument('--output',type=Path,help='new JSONL file; default or - writes stdout for piping to run')
+    s.set_defaults(fn=cmd_mock_feed)
 
     for command,mode,help_text in (('run','stream','consume a market stream and emit strategy webhooks'),
                                   ('check','check','process one JSONL/HTTP snapshot, deliver webhooks, and exit')):

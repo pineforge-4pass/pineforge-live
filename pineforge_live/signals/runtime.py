@@ -11,6 +11,8 @@ from dataclasses import replace
 from pineforge_live import types as T
 from pineforge_live.bars import FormingBarBuilder
 from pineforge_live.bars.builder import compare_bar
+from pineforge_live.bars.minute_stream import MinuteStream
+from pineforge_live.bars.calendar import ParentWindows
 from pineforge_live.bars.policy import tf_ms
 from pineforge_live.engine import EngineHandle
 from pineforge_live.epoch import apply_epoch
@@ -82,17 +84,18 @@ class SignalWorker:
         e=self.engine
         return {'bar':e.ledger.last.bar,'bar_index':e.ledger.n-1,'forming':e.forming,
                 'last_seq':e.last_seq,'last_eval_ms':e.last_eval_ms,
-                'forming_from_ticks':e.forming_from_ticks,'last_tick':e.last_tick}
+                'forming_from_ticks':e.forming_from_ticks,'last_tick':e.last_tick,
+                'input_state':e.input_state,'last_input_minute':e.last_input_minute}
 
     async def open(self):return await self._call(self._open)
     async def context(self):return await self._call(self._context)
-    async def settle(self,bar,now_ms):return await self._call(self.engine.settle,bar,now_ms)
-    async def evaluate(self,bar,now_ms,last_seq=None,*,from_ticks=False,last_tick=None):
+    async def settle(self,bar,now_ms,**input_kwargs):return await self._call(self.engine.settle,bar,now_ms,**input_kwargs)
+    async def evaluate(self,bar,now_ms,last_seq=None,*,from_ticks=False,last_tick=None,**input_kwargs):
         self.busy_evaluate=True
-        try:return await self._call(self.engine.evaluate,bar,now_ms,last_seq=last_seq,from_ticks=from_ticks,last_tick=last_tick)
+        try:return await self._call(self.engine.evaluate,bar,now_ms,last_seq=last_seq,from_ticks=from_ticks,last_tick=last_tick,**input_kwargs)
         finally:self.busy_evaluate=False
-    async def observe(self,bar,now_ms,last_seq=None,*,from_ticks=False,last_tick=None):
-        return await self._call(self.engine.observe,bar,now_ms,last_seq=last_seq,from_ticks=from_ticks,last_tick=last_tick)
+    async def observe(self,bar,now_ms,last_seq=None,*,from_ticks=False,last_tick=None,**input_kwargs):
+        return await self._call(self.engine.observe,bar,now_ms,last_seq=last_seq,from_ticks=from_ticks,last_tick=last_tick,**input_kwargs)
     def abort_probe(self):
         if self.busy_evaluate and self.engine is not None:self.engine.h.request_abort()
     async def halt(self,cause):
@@ -132,7 +135,13 @@ async def _run_signals(config, *, mode=None, source=None, transport=None, clock=
     from pineforge_live.webhooks.delivery import Dispatcher
     mode=mode or config.mode
     if mode not in ('stream','check'):raise ValueError('mode must be stream or check')
-    source=source or create_source(config.source,config.script_tf)
+    input_tf=getattr(config,'input_tf',None) or config.script_tf
+    minute_mode=input_tf=='1' and tf_ms(config.script_tf)>60_000
+    windows=getattr(config,'parent_windows',None)
+    calendar=ParentWindows(windows) if windows is not None else None
+    if windows!=getattr(config.epoch,'parent_windows',None):
+        raise SourceError('runtime calendar does not match epoch identity')
+    source=source or create_source(config.source,config.script_tf,input_tf=input_tf)
     if mode=='check' and not isinstance(source,(HttpSource,JsonlSource)) and not hasattr(source,'snapshot'):
         raise ValueError('check requires a finite JSONL or HTTP snapshot source')
     config.journal_path.parent.mkdir(parents=True,exist_ok=True)
@@ -183,6 +192,14 @@ async def _run_signals(config, *, mode=None, source=None, transport=None, clock=
         context=await worker.open()
         builder=FormingBarBuilder(config.script_tf)
         builder._cur=context['forming']
+        minute_stream=None
+        if minute_mode:
+            minute_stream=(MinuteStream.from_state(context['input_state'],parent_windows=calendar) if context.get('input_state')
+                           else MinuteStream(config.script_tf,mode=getattr(config,'input_mode','mixed'),parent_windows=calendar))
+            if minute_stream.mode != getattr(config,'input_mode','mixed'):
+                raise SourceError('minute input checkpoint mode mismatch')
+            if context['forming'] is not None and context.get('input_state') is None:
+                raise SourceError('minute runtime forming state has no aggregation checkpoint')
         last_seq=context['last_seq']
         last_tick=context['last_tick']
         last_bar=context['bar']
@@ -192,6 +209,10 @@ async def _run_signals(config, *, mode=None, source=None, transport=None, clock=
         previous_hlc=None
         builder_from_ticks=context['forming_from_ticks']
         confirmation_pending=set()
+
+        def next_open():
+            try:return calendar.next_open(last_bar.ts_open) if calendar else last_bar.ts_open+width
+            except ValueError as exc:raise SourceError(str(exc)) from None
 
         async def deliver():
             report=await dispatcher.drain()
@@ -206,11 +227,11 @@ async def _run_signals(config, *, mode=None, source=None, transport=None, clock=
                 if mode=='check' and hasattr(source,'snapshot'):
                     items=await source.snapshot(None)
                     for event in items:
-                        if isinstance(event,T.Confirmed):confirmation_pending.add(event.bar.ts_open)
+                        if isinstance(event,T.Confirmed) and not minute_mode:confirmation_pending.add(event.bar.ts_open)
                         await queue.put(event)
                 else:
                     async for event in source.events(from_seq=None):
-                        if isinstance(event,T.Confirmed):
+                        if isinstance(event,T.Confirmed) and not minute_mode:
                             confirmation_pending.add(event.bar.ts_open)
                             worker.abort_probe()
                         await queue.put(event)
@@ -220,7 +241,7 @@ async def _run_signals(config, *, mode=None, source=None, transport=None, clock=
                 await queue.put(exc)
         producer_task=asyncio.create_task(produce())
 
-        async def settle(bar,ts):
+        async def settle(bar,ts,**input_kwargs):
             nonlocal last_bar,last_eval,previous_hlc
             if bar.ts_open<last_bar.ts_open:
                 # Historical snapshots may replay bars; verify every row we
@@ -235,11 +256,11 @@ async def _run_signals(config, *, mode=None, source=None, transport=None, clock=
             if bar.ts_open==last_bar.ts_open:
                 if compare_bar(last_bar,bar):raise SourceError('confirmed bar changed after settlement')
                 return
-            result=await worker.settle(bar,ts)
+            result=await worker.settle(bar,ts,**input_kwargs)
             if not result.completed:
                 # A settle owns priority; an engine abort has not consumed
                 # the bar or its event IDs, so this exact bar can retry.
-                result=await worker.settle(bar,ts)
+                result=await worker.settle(bar,ts,**input_kwargs)
             if not result.completed:raise RuntimeError('settlement recompute repeatedly aborted')
             status['emitted']+=len(result.event_ids);status['settled_bars']+=not result.duplicate
             last_bar=bar;last_eval=None;previous_hlc=None
@@ -262,6 +283,7 @@ async def _run_signals(config, *, mode=None, source=None, transport=None, clock=
                 # A healed gap is only a notice; all missing ticks must
                 # still be delivered in order before a newer sequence.
                 continue
+            input_kwargs={}
             if isinstance(event,T.Tick):
                 t=event.tick
                 if last_seq is not None and t.seq<=last_seq:
@@ -269,17 +291,52 @@ async def _run_signals(config, *, mode=None, source=None, transport=None, clock=
                         raise SourceError('conflicting duplicate tick after restart')
                     status['duplicate_ticks']+=1;continue
                 if last_seq is not None and t.seq!=last_seq+1:raise SourceError('tick sequence gap')
-                if t.ts<last_bar.ts_open+width:raise SourceError('new tick precedes settled history')
+                if t.ts<next_open():raise SourceError('new tick precedes settled history')
                 if last_tick is not None and t.ts<last_tick.ts:raise SourceError('tick timestamp regressed')
-                if builder.forming() is None:builder_from_ticks=True
-                closed_bars=builder.push(t)
-                for closed in closed_bars:await settle(closed,closed.ts_open+width)
-                if closed_bars:builder_from_ticks=True
-                forming=builder.forming();last_seq=t.seq;last_tick=t;ts=t.ts
+                if minute_mode:
+                    try:updates=minute_stream.push(event)
+                    except ValueError as exc:raise SourceError(str(exc)) from None
+                    forming=updates[-1].bar
+                    input_kwargs={'input_state':minute_stream.export_state(compact=True)}
+                    builder_from_ticks=True
+                else:
+                    if builder.forming() is None:builder_from_ticks=True
+                    closed_bars=builder.push(t)
+                    for closed in closed_bars:await settle(closed,closed.ts_open+width)
+                    if closed_bars:builder_from_ticks=True
+                    forming=builder.forming()
+                last_seq=t.seq;last_tick=t;ts=t.ts
+            elif isinstance(event,T.Confirmed) and minute_mode:
+                bar=event.bar
+                saved=journal._exec('SELECT payload_json,checksum FROM signal_input_minutes WHERE epoch_hash=? AND ts_open=?',
+                                    (config.epoch.epoch_hash(),bar.ts_open)).fetchone()
+                if saved is not None:
+                    domain=[config.epoch.epoch_hash(),bar.ts_open,saved['payload_json']]
+                    if saved['checksum'] != T.canonical_sha256(domain):
+                        raise SourceError('input minute identity checksum mismatch')
+                    if T.NormalizedBar(**json.loads(saved['payload_json'])) != bar:
+                        raise SourceError('historical input minute changed')
+                    if max_events and status['source_events']>=max_events:break
+                    continue
+                if bar.ts_open<next_open():
+                    raise SourceError('input minute precedes settled history without a recorded identity')
+                try:updates=minute_stream.push(event)
+                except ValueError as exc:raise SourceError(str(exc)) from None
+                input_kwargs={'input_state':minute_stream.export_state(compact=True),'input_minute':bar}
+                ts=bar.ts_open+60_000
+                if updates and isinstance(updates[-1],T.Confirmed):
+                    for update in updates:await settle(update.bar,ts,**input_kwargs)
+                    if max_events and status['source_events']>=max_events:break
+                    continue
+                if not updates:
+                    raise SourceError('input minute replay has no durable identity')
+                forming=updates[-1].bar
+                builder_from_ticks=False
             elif isinstance(event,T.Forming):
+                if minute_mode:raise SourceError('input_tf=1 accepts confirmed minute bars, not forming snapshots')
                 forming=event.bar
-                if forming.ts_open<last_bar.ts_open+width:continue
-                if forming.ts_open!=last_bar.ts_open+width:raise SourceError('forming snapshot skipped confirmed bars')
+                if forming.ts_open<next_open():continue
+                if forming.ts_open!=next_open():raise SourceError('forming snapshot skipped confirmed bars')
                 builder._cur=forming;builder_from_ticks=False;ts=max(clock.now_ms(),forming.ts_open)
             elif isinstance(event,T.Confirmed):
                 bar=event.bar
@@ -292,18 +349,18 @@ async def _run_signals(config, *, mode=None, source=None, transport=None, clock=
                 if max_events and status['source_events']>=max_events:break
                 continue
             else:raise SourceError('unsupported source event')
-            if forming.ts_open!=last_bar.ts_open+width:raise SourceError('input does not continue confirmed history')
+            if forming.ts_open!=next_open():raise SourceError('input does not continue confirmed history')
             hlc=(forming.o,forming.h,forming.l,forming.c,forming.v,forming.trade_count)
             if forming.ts_open not in confirmation_pending and (last_eval is None or (hlc!=previous_hlc and ts-last_eval>=min_eval_ms)):
-                result=await worker.evaluate(forming,ts,last_seq,from_ticks=builder_from_ticks,last_tick=last_tick)
+                result=await worker.evaluate(forming,ts,last_seq,from_ticks=builder_from_ticks,last_tick=last_tick,**input_kwargs)
                 if result.completed:
                     status['evaluations']+=1;status['emitted']+=len(result.event_ids)
                     last_eval=ts;previous_hlc=hlc
                     await deliver()
                 else:
-                    await worker.observe(forming,ts,last_seq,from_ticks=builder_from_ticks,last_tick=last_tick)
+                    await worker.observe(forming,ts,last_seq,from_ticks=builder_from_ticks,last_tick=last_tick,**input_kwargs)
             else:
-                await worker.observe(forming,ts,last_seq,from_ticks=builder_from_ticks,last_tick=last_tick);status['coalesced']+=1
+                await worker.observe(forming,ts,last_seq,from_ticks=builder_from_ticks,last_tick=last_tick,**input_kwargs);status['coalesced']+=1
             if max_events and status['source_events']>=max_events:break
         # Finish the current delivery budget even for a finite check. A
         # failed head event remains a queue barrier; no later action jumps it.

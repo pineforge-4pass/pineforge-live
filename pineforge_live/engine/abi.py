@@ -132,6 +132,7 @@ _PROTOTYPES: dict[str, tuple[list, object]] = {
     "strategy_closed_trade_exit_id": ([H, ctypes.c_int], ctypes.c_char_p),
     "strategy_closed_trade_exit_comment": ([H, ctypes.c_int], ctypes.c_char_p),
     "strategy_closed_trade_close_cause": ([H, ctypes.c_int], ctypes.c_int),
+    "strategy_closed_trade_entry_incarnation": ([H, ctypes.c_int], ctypes.c_uint64),
     "strategy_position_size": ([H], ctypes.c_double),
     "strategy_current_equity": ([H], ctypes.c_double),
     "strategy_script_bars_processed": ([H], ctypes.c_int64),

@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from pineforge_live import types as T
 from pineforge_live.bars.policy import bucket_start, tf_ms
+from pineforge_live.bars.calendar import ParentWindows
 
 MAX_FRAME_BYTES = 1_048_576
 
@@ -154,10 +155,11 @@ def parse_frame(frame, script_tf):
     return tuple(parse_event(row, script_tf) for row in rows)
 
 
-def load_history(path, script_tf):
+def load_history(path, script_tf, *, parent_windows=None):
     """Read the existing six-column CSV contract, validating range and continuity."""
     try:
         width = tf_ms(script_tf)
+        calendar=ParentWindows(parent_windows) if parent_windows is not None else None
         with Path(path).open(newline='', encoding='utf-8') as stream:
             reader = csv.DictReader(stream)
             expected = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
@@ -169,8 +171,10 @@ def load_history(path, script_tf):
                     raise SourceError('history: malformed CSV row')
                 parsed = {'ts_open': int(row['timestamp']), **{k: float(row[col]) for k, col in
                           zip(('o', 'h', 'l', 'c', 'v'), expected[1:])}}
-                bar = parse_bar(parsed, script_tf)
-                if result and bar.ts_open != result[-1].ts_open + width:
+                bar = parse_bar(parsed, '1' if calendar else script_tf)
+                if calendar and (len(result)>=len(calendar.windows) or bar.ts_open!=calendar.windows[len(result)][0]):
+                    raise SourceError('history: bars must match parent window schedule prefix')
+                if not calendar and result and bar.ts_open != result[-1].ts_open + width:
                     raise SourceError('history: bars must be increasing and contiguous')
                 result.append(bar)
             if not result:
