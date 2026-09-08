@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pineforge-live"
+version = "0.1.0"
+description = "Live runtime whose ledger is the PineForge backtest (spec 2026-09-07)"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+pineforge-live = "pineforge_live.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pineforge_live*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
