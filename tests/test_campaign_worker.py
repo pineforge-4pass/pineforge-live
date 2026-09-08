@@ -101,7 +101,7 @@ def successful_case(command, *, stdout_path, stderr_path, timeout):
     config = json.loads(Path(command[-1]).read_text())
     Path(stdout_path).write_text("fake case\n")
     Path(stderr_path).write_text("")
-    report = {"status": "passed", "live_backtest_equal": True,
+    report = {"status": "passed", "live_backtest_equal": True, "batch_actions_in_window": 1,
               "modes": {name: {"ok": True} for name in
                         ["bars-direct", *("ticks-"+p for p in config["tick_policies"])]}}
     (Path(config["output"])/"result.json").write_bytes(canonical_json_bytes(report))
@@ -215,6 +215,15 @@ def test_pass_requires_all_modes_and_cannot_replace_identity():
                                     "modes": {"bars-direct": {"ok": True}}}, 0, ["high-first"])
     with pytest.raises(RuntimeError, match="identity"):
         worker._merge_report(entry, {"status": "failed", "probeId": "other"}, 1, [])
+
+
+@pytest.mark.parametrize("count", [0, -1, None, True])
+def test_pass_requires_nonempty_order_action_evidence(count):
+    report = {"status": "passed", "live_backtest_equal": True,
+              "batch_actions_in_window": count,
+              "modes": {name: {"ok": True} for name in ("bars-direct", "ticks-high-first")}}
+    with pytest.raises(RuntimeError, match="every requested mode"):
+        worker._merge_report({"probeId": "p"}, report, 0, ["high-first"])
 
 
 def test_process_timeout_kills_process_group_and_waits(monkeypatch, tmp_path):

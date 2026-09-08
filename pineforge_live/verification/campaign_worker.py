@@ -242,6 +242,8 @@ def _merge_report(entry, report, status, policies):
         modes = report.get("modes")
         expected_modes = {"bars-direct", *("ticks-"+p for p in policies)}
         if (status != 0 or report.get("live_backtest_equal") is not True
+                or type(report.get("batch_actions_in_window")) is not int
+                or report["batch_actions_in_window"] <= 0
                 or not isinstance(modes, dict) or set(modes) != expected_modes
                 or any(not isinstance(mode, dict) or mode.get("ok") is not True for mode in modes.values())):
             raise RuntimeError("case pass lacks successful evidence for every requested mode")

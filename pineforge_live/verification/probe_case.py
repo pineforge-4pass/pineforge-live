@@ -180,6 +180,8 @@ def config_base(case,library,metadata,calendar,history_path,source_path,journal_
     return {'strategy_path':str(library),'strategy_name':case['probe']['probe_id'],
             'strategy_source_path':case['evidence']['strategy'],'history_path':str(history_path),'journal_path':str(journal_path),
             'script_tf':case['probe']['timeframe'],'input_tf':'1','input_mode':'bars','parent_windows_path':str(calendar),
+            # The pinned campaign CLI defaults --chart-tz to empty (UTC);
+            # its lane syminfo timezone setter does not change that clock.
             'chart_timezone':metadata.get('chart_timezone',''),
             'instrument':{'venue':prefix,'market_type':'future' if kind=='futures' else 'spot','symbol':ticker or prefix},
             'syminfo':syminfo,'inputs':list(inputs.items()),'overrides':[[str(k),str(v).lower() if isinstance(v,bool) else str(v)] for k,v in overrides.items()],
@@ -318,7 +320,7 @@ def verify(case):
                  'result':clean(grader.analyze_strategy(directory)),'grader_sha256':file_identity(scripts/'verify_corpus.py')['sha256']}
     except Exception as exc:grading={'error':f'{type(exc).__name__}: {exc}','scope':'diagnostic only; not a campaign parity verdict'}
     ok=all(r['ok'] for r in modes.values())
-    return {'status':'passed' if ok else 'failed','live_backtest_equal':ok,'native_chart_equal':not bar_differences,
+    return {'status':('passed' if expected else 'unmeasured') if ok else 'failed','live_backtest_equal':ok,'native_chart_equal':not bar_differences,
             'native_chart_differences':bar_differences[:10],'native_chart_difference_count':len(bar_differences),
             'window':{'start_index':start,'end_index_exclusive':end,'history_bars':start,'replay_bars':end-start,
                       'first_minute':minutes[0].ts_open,'last_minute':minutes[-1].ts_open,'minutes':len(minutes)},

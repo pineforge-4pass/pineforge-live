@@ -65,11 +65,18 @@ class FakeHandle:
         return RunResult(0,trades,3. if trades else 0.,len(rows),hashes,size,rows[-1][1] if size else float('nan'),1,float('nan'),10000.,0)
 
 
-def test_verifier_runs_both_modes_real_http_and_restart_with_fake_decisions(tmp_path,monkeypatch):
+class EmptyHandle(FakeHandle):
+    def run_full(self,*args,**kwargs):
+        return replace(super().run_full(*args,**kwargs),trades=[],position_size=0.,
+                       position_avg_price=float('nan'),net_profit=0.)
+
+
+@pytest.mark.parametrize('handle_type,expected_actions,status',[(FakeHandle,2,'passed'),(EmptyHandle,0,'unmeasured')])
+def test_verifier_runs_both_modes_real_http_and_restart_with_fake_decisions(tmp_path,monkeypatch,handle_type,expected_actions,status):
     """Tests verifier wiring; fake decisions never count as probe measurements."""
     import pineforge_live.signals.runtime as runtime
-    monkeypatch.setattr(case,'EngineHandle',FakeHandle)
-    monkeypatch.setattr(runtime,'EngineHandle',FakeHandle)
+    monkeypatch.setattr(case,'EngineHandle',handle_type)
+    monkeypatch.setattr(runtime,'EngineHandle',handle_type)
     monkeypatch.setattr(case,'apply_epoch',lambda *args:None)
     monkeypatch.setattr(runtime,'apply_epoch',lambda *args:None)
     monkeypatch.setitem(sys.modules,'verify_routing',SimpleNamespace(pine_input_overrides_from_document=lambda x:{}))
@@ -88,7 +95,26 @@ def test_verifier_runs_both_modes_real_http_and_restart_with_fake_decisions(tmp_
          'feeds':{'chart':str(chart),'finer':str(finer)},'replay_bars':2,'daily_replay_bars':2,
          'tick_policies':['high-first','low-first'],'seed':7}
     result=case.verify(doc)
-    assert result['status']=='passed',result
-    assert result['native_chart_equal'] and result['batch_actions_in_window']==2
+    assert result['status']==status,result
+    assert result['native_chart_equal'] and result['batch_actions_in_window']==expected_actions
     assert set(result['modes'])=={'bars-direct','ticks-high-first','ticks-low-first'}
-    assert all(x['actions']==2 and x['restart_deliveries']==0 and x['input_minutes']==6 for x in result['modes'].values())
+    assert all(x['actions']==expected_actions and x['restart_deliveries']==0 and x['input_minutes']==6 for x in result['modes'].values())
+
+
+@pytest.mark.parametrize('metadata,chart_clock',[({},''),({'chart_timezone':''},''),({'chart_timezone':'Asia/Taipei'},'Asia/Taipei')])
+def test_verifier_keeps_pinned_campaign_chart_default_separate_from_exchange(tmp_path,monkeypatch,metadata,chart_clock):
+    # Pinned campaign run_strategy --chart-tz defaults to empty; lab forwards
+    # lane timezone as syminfo only. Explicit probe chart clock wins.
+    from pineforge_live.config import load_signal_config
+    monkeypatch.setitem(sys.modules,'verify_routing',SimpleNamespace(pine_input_overrides_from_document=lambda x:{}))
+    library=tmp_path/'fake.so';library.write_bytes(b'not executed')
+    source=tmp_path/'strategy.pine';source.write_text('// fixture')
+    history=tmp_path/'history.csv';case.write_bars(history,[minute(0),minute(3)])
+    events=tmp_path/'events.jsonl';events.write_text('')
+    calendar=tmp_path/'calendar.json';calendar.write_text(json.dumps([[0,180000],[180000,360000],[360000,540000]]))
+    fixture={'lab':str(tmp_path),'probe':{'symbol':'NYSE:TEST','probe_id':'clock-fixture','timeframe':'3'},
+             'template':{'environment':{'PINEFORGE_VERIFY_TIMEZONE':'America/New_York'}},'evidence':{'strategy':str(source)}}
+    doc=case.config_base(fixture,library,metadata,calendar,history,events,tmp_path/'signals.sqlite3','http://127.0.0.1:1/webhook')
+    path=tmp_path/'config.json';path.write_text(json.dumps(doc))
+    c=load_signal_config(path)
+    assert c.epoch.setter_sequence()[:2]==[('set_chart_timezone',(chart_clock,)),('set_syminfo_timezone',('America/New_York',))]
