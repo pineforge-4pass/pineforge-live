@@ -246,14 +246,14 @@ Without an engine — unit tests only, engine-backed cases skipped:
 
 ```sh
 python3 -m pytest -o addopts=""
-# 522 passed, 122 skipped (2026-09-09 local candidate)
+# 530 passed, 124 skipped (2026-09-09 local candidate)
 ```
 
 With an engine:
 
 ```sh
 python3 -m pytest -o addopts=""   # with PINEFORGE_ENGINE_ROOT exported
-# 644 passed (2026-09-09 local candidate)
+# 654 passed (2026-09-09 local candidate)
 ```
 
 `pyproject.toml` sets `addopts = "-q"`; `-o addopts=""` turns quiet mode off so

@@ -69,11 +69,14 @@ A physical order has an immutable durable identity and client id. Repeated
 submissions of the same intended order reuse that identity. A different
 physical order allocates another sequence. Reversal entries wait for the
 close leg's FILLED state and a venue-flat snapshot, including when the two
-Pine ids differ.
+Pine ids differ or the close was reserved in an earlier decision. An
+ACKED market close remains an active close; an ACKED conditional is resting.
 
 `MARKET_AT_OPEN` initially records a notice. The first successful evaluation
 for its target bar folds the requote or withdrawal into that notice before
-one physical order is reserved. An aborted evaluation does not release it.
+one physical order is reserved. Withdrawing an entry notice leaves its
+reduce-only sibling intact. An aborted evaluation does not release notices
+or consume its decision id; the same id can retry a recompute abort.
 Current STOP permission is checked again immediately before submission.
 
 Venue trades deduplicate by instrument and venue trade id. Conflicting payloads

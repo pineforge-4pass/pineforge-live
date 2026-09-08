@@ -82,6 +82,7 @@ class CommittedStep:
     output: CoreOutput
     client_ids: tuple[str, ...]
     duplicate: bool = False
+    completed: bool = True
 
 
 class DurableCore:
@@ -232,6 +233,16 @@ CREATE TABLE IF NOT EXISTS core_decisions(
         try:
             with self.j.transaction():
                 output = operation()
+                failed = ((phase == 'settle' and output.settle is None) or
+                          (phase == 'evaluate' and (output.probe is None or output.probe.aborted)))
+                if failed:
+                    retryable = output.stop is None and (
+                        (phase == 'settle' and any(x.get('kind') == 'recompute_aborted' for x in output.incidents)) or
+                        (phase == 'evaluate' and output.probe is not None and output.probe.aborted))
+                    self.poisoned = not retryable
+                    # Commit the attempt's diagnostic records, but never
+                    # consume its stable decision id or publish an outbox.
+                    return CommittedStep(output, (), completed=False)
                 bar_index = (output.settle.bar_index if phase == 'settle' and output.settle is not None
                              else self.core.ledger.n)
                 ids = self.execution.ingest(output, phase=phase, bar_index=bar_index,

@@ -7,10 +7,15 @@ from __future__ import annotations
 
 import contextlib
 import json
+from dataclasses import replace
 
 from pineforge_live import types as T
 from pineforge_live.journal.journal import JournalConflict, JournalCorrupt
 from .identity import canonical, digest
+
+_STATUS_RANK = {T.OrderStatus.UNKNOWN: 0, T.OrderStatus.PENDING: 1,
+                T.OrderStatus.ACKED: 2, T.OrderStatus.PARTIAL: 3,
+                **{s: 4 for s in T.TERMINAL_STATUSES}}
 
 
 @contextlib.contextmanager
@@ -152,6 +157,10 @@ class ExecutionStore:
                 if state.filled_qty == prior.filled_qty:
                     return
                 raise JournalConflict("terminal order acquired additional unexplained fills")
+            if _STATUS_RANK[state.status] <= _STATUS_RANK[prior.status] and state.filled_qty == prior.filled_qty:
+                return
+            if _STATUS_RANK[state.status] < _STATUS_RANK[prior.status]:
+                state = replace(state, status=prior.status)
         self.j.update_order_state(client_id, canonical(state), terminal=state.status in T.TERMINAL_STATUSES)
         self.set_state(client_id, state.status.value)
 

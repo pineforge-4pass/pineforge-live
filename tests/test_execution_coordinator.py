@@ -394,3 +394,127 @@ def test_process_death_after_venue_acceptance_adopts_saved_identity(env, monkeyp
     run(restarted.recover()); run(restarted.drain())
     assert restarted.store.requests()[0]["client_id"] == ids[0]
     assert len(run(mock.fills_since(c.instrument, None))[0]) == 1
+
+
+@pytest.mark.parametrize('requote_close', [False, True])
+def test_notice_withdraw_only_removes_its_reversal_leg(env, requote_close):
+    c, _, _, clock = env
+    mock = MockExecutor(c.instrument, initial_position=2)
+    mock.advance(100, clock.now_ms())
+    c.executor = mock
+    close = request('MARKET_AT_OPEN', intent='Rev', qty=2, side=T.Side.SELL, reduce_only=True, bar=5)
+    entry = request('MARKET_AT_OPEN', intent='Rev', qty=1, side=T.Side.SELL, bar=5)
+    ingest(c, close, entry, bar=4)
+    actions = [replace(entry, qty=0, reason='withdraw')]
+    if requote_close:
+        actions.append(replace(close, reason='open_requote'))
+    c.ingest(evaluation(*actions, bar=5), phase='evaluate', bar_index=5, cycle_seq=0)
+    assert {(n['payload']['request']['reduce_only'], n['state']) for n in c.store.notices()} == {
+        (True, 'RELEASED'), (False, 'WITHDRAWN')}
+    run(c.drain())
+    assert run(mock.position(c.instrument)) == 0
+    fills, _ = run(mock.fills_since(c.instrument, None))
+    assert len(fills) == 1 and fills[0].qty == 2
+
+
+def test_notice_withdraw_does_not_cancel_another_bars_partial_order(env):
+    c, mock, _, _ = env
+    mock.plan(SubmitFault(partial_fill_ratio=.5))
+    old = ingest(c, request(intent='same', bar=4))[0]
+    run(c.drain())
+    notice = request('MARKET_AT_OPEN', intent='same', bar=5)
+    ingest(c, notice, bar=4)
+    c.ingest(evaluation(replace(notice, qty=0, reason='withdraw'), bar=5),
+             phase='evaluate', bar_index=5, cycle_seq=0)
+    run(c.drain())
+    assert c.store.latest_state(old).status is T.OrderStatus.PARTIAL
+    assert len(c.store.requests()) == 1
+
+
+def test_reversal_close_dependency_survives_separate_ingest_calls(env):
+    c, _, _, clock = env
+    mock = MockExecutor(c.instrument, initial_position=1)
+    mock.advance(100, clock.now_ms())
+    mock.plan(SubmitFault(partial_fill_ratio=.5))
+    c.executor = mock
+    close_id = ingest(c, request('MARKET_NOW', intent='old-close', qty=1, side=T.Side.SELL, reduce_only=True, bar=4))[0]
+    notice = request('MARKET_AT_OPEN', intent='new-entry', qty=1, side=T.Side.SELL, bar=5)
+    ingest(c, notice, bar=4)
+    entry_id = c.ingest(evaluation(bar=5), phase='evaluate', bar_index=5, cycle_seq=0)[0]
+    assert c.store.request(entry_id)['payload']['parent_client_id'] == close_id
+    run(c.drain())
+    assert c.store.request(entry_id)['state'] == 'PREPARED'
+    assert run(mock.position(c.instrument)) == .5
+    clock.advance_to(2000)
+    mock.advance(100, clock.now_ms())
+    run(c.drain())
+    assert c.store.latest_state(close_id).status is T.OrderStatus.FILLED
+    assert c.store.latest_state(entry_id).status is T.OrderStatus.FILLED
+    assert run(mock.position(c.instrument)) == -1
+
+
+def test_order_status_never_regresses_on_equal_or_increasing_partial_fill(env):
+    c, mock, _, _ = env
+    mock.plan(SubmitFault(partial_fill_ratio=.5))
+    cid = ingest(c, request())[0]
+    run(c.drain())
+    partial = c.store.latest_state(cid)
+    c.store.record_state(cid, replace(partial, status=T.OrderStatus.ACKED))
+    assert c.store.latest_state(cid).status is T.OrderStatus.PARTIAL
+    c.store.record_state(cid, replace(partial, status=T.OrderStatus.ACKED, filled_qty=.75))
+    assert c.store.latest_state(cid).status is T.OrderStatus.PARTIAL
+    assert c.store.latest_state(cid).filled_qty == .75
+    c.store.record_state(cid, replace(partial, status=T.OrderStatus.FILLED, filled_qty=1))
+    assert c.store.latest_state(cid).status is T.OrderStatus.FILLED
+
+
+def test_terminal_rejection_does_not_masquerade_as_unresolved_submission(env):
+    c, mock, _, _ = env
+    mock.plan(SubmitFault(rejection=T.ReasonClass.TERMINAL))
+    first = ingest(c, request(intent='first'))[0]
+    run(c.drain())
+    second = ingest(c, request(intent='second', bar=5))[0]
+    run(c.drain())
+    assert c.store.latest_state(first).status is T.OrderStatus.REJECTED
+    assert c.store.latest_state(second).status is T.OrderStatus.FILLED
+    snapshot = c.snapshot(5)
+    assert snapshot.unresolved == []
+    assert snapshot.terminal_residuals == {first: 1}
+
+
+def test_prepared_entry_waits_for_a_later_acked_market_close(env):
+    c, _, _, clock = env
+    mock = MockExecutor(c.instrument, initial_position=1, immediate_market=False)
+    mock.advance(100, clock.now_ms())
+    c.executor = mock
+    entry = ingest(c, request(intent='new', side=T.Side.SELL, bar=5))[0]
+    close = ingest(c, request('MARKET_NOW', intent='old', side=T.Side.SELL, reduce_only=True, bar=4))[0]
+    assert c.store.request(entry)['payload']['parent_client_id'] is None
+    run(c.drain())
+    assert c.store.latest_state(close).status is T.OrderStatus.ACKED
+    assert c.store.request(entry)['state'] == 'PREPARED'
+    assert run(mock.position(c.instrument)) == 1
+    mock.advance(100, 2000)
+    clock.advance_to(2000)
+    run(c.drain())
+    assert c.store.latest_state(close).status is T.OrderStatus.FILLED
+    assert c.store.latest_state(entry).status is T.OrderStatus.ACKED
+    mock.advance(100, 3000)
+    run(c.poll())
+    assert run(mock.position(c.instrument)) == -1
+
+
+def test_conflicting_duplicate_fill_timestamp_does_not_advance_cursor(env):
+    c, mock, j, _ = env
+    ingest(c, request())
+    run(c.drain())
+    fills, _ = run(mock.fills_since(c.instrument, None))
+    before = c.store.cursor('fills')
+    async def conflict(instrument, cursor):
+        return [replace(fills[0], ts=fills[0].ts + 1)], 'conflicting-next-page'
+    mock.fills_since = conflict
+    with pytest.raises(JournalConflict):
+        run(c.poll())
+    assert c.store.cursor('fills') == before
+    assert len(j.rows('fills', '1=1', ())) == 1
+    assert c.snapshot(4).our_signed_fills == 1

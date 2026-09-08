@@ -61,9 +61,13 @@ class ExecutionCoordinator:
         role = action.cls or action.kind
         logical_key = canonical([self.epoch_hash, cycle_seq, action.intent, leg,
                                  action.target_bar_index, action.kind, role, target_client_id])
+        prior = self.store.by_logical_key(logical_key)
+        if prior is not None and parent_client_id is None:
+            # Completed parents disappear from pending-close discovery;
+            # retries retain the dependency already bound to this order.
+            parent_client_id = prior["payload"].get("parent_client_id")
         semantic_hash = digest({"request": action, "operation": operation,
                                 "target_client_id": target_client_id, "parent_client_id": parent_client_id})
-        prior = self.store.by_logical_key(logical_key)
         if prior is not None:
             if prior["payload"]["semantic_hash"] != semantic_hash:
                 raise JournalConflict("submitted logical action was changed; adopt before replacement")
@@ -113,11 +117,16 @@ class ExecutionCoordinator:
                 if a.kind not in _SUPPORTED:
                     raise ExecutionSafetyError(f"unsupported core action {a.kind!r}")
             # Cancels/withdraws win over an advance or an entry in the batch.
-            withdrawn = set()
+            withdrawn, stale = set(), set()
             for a in actions:
                 if a.kind != "CANCEL_STALE_CYCLE" and a.qty != 0:
                     continue
-                withdrawn.add((a.intent, a.target_bar_index))
+                if a.kind != "CANCEL_STALE_CYCLE":
+                    slot = self._slot(a, cycle_seq)
+                    withdrawn.add(slot)
+                    self.store.finish_notice(slot, None)
+                    continue
+                stale.add((a.intent, a.target_bar_index))
                 for notice in self.store.notices():
                     p = notice["payload"]; req = _request(p["request"])
                     if req.intent == a.intent and req.target_bar_index == a.target_bar_index:
@@ -133,7 +142,8 @@ class ExecutionCoordinator:
                                                  decision_id=decision_id, operation="cancel",
                                                  target_client_id=row["client_id"]))
             normal = [a for a in actions if a.kind != "CANCEL_STALE_CYCLE" and a.qty > 0 and
-                      (a.intent, a.target_bar_index) not in withdrawn]
+                      (a.intent, a.target_bar_index) not in stale and
+                      self._slot(a, cycle_seq) not in withdrawn]
             for a in normal:
                 if a.kind != "MARKET_AT_OPEN":
                     continue
@@ -155,12 +165,20 @@ class ExecutionCoordinator:
             # A two-leg reversal waits for its close's terminal receipt.
             closes: dict[tuple, list[str]] = {}
             def parent_for(a):
-                candidates = closes.get((a.side, a.target_bar_index), [])
-                if a.reduce_only or not candidates:
+                if a.reduce_only:
+                    return None
+                candidates = set(closes.get((a.side, a.target_bar_index), []))
+                for row in self.store.requests():
+                    p = row["payload"]
+                    if (p["operation"] == "submit" and p["request"]["reduce_only"] and
+                            p["request"]["side"] == a.side.value and row["state"] not in _TERMINAL and
+                            (row["state"] != "ACKED" or p["order"]["kind"] == T.OrderKind.MARKET.value)):
+                        candidates.add(row["client_id"])
+                if not candidates:
                     return None
                 if len(candidates) != 1:
                     raise ExecutionSafetyError("multiple closing actions make reversal attribution ambiguous")
-                return candidates[0]
+                return next(iter(candidates))
             direct = [a for a in normal if a.kind != "MARKET_AT_OPEN"]
             direct.sort(key=lambda a: not a.reduce_only)
             for a in direct:
@@ -243,8 +261,14 @@ class ExecutionCoordinator:
             if abs(position) > self.constraints.lot_step / 2:
                 raise ExecutionSafetyError("reversal close has not left venue flat")
         if not p["request"]["reduce_only"] and p["operation"] == "submit":
+            closing = [r for r in self.store.requests()
+                       if r["payload"]["operation"] == "submit" and r["payload"]["request"]["reduce_only"]
+                       and (r["state"] in {"PREPARED", "SUBMITTING", "UNKNOWN", "PENDING", "PARTIAL"} or
+                            (r["state"] == "ACKED" and r["payload"]["order"]["kind"] == T.OrderKind.MARKET.value))]
+            if closing:
+                return
             unknown = [r["client_id"] for r in self.store.requests()
-                       if r["state"] in {"UNKNOWN", "SUBMITTING", "REJECTED"} and r["client_id"] != row["client_id"]]
+                       if r["state"] in {"UNKNOWN", "SUBMITTING"} and r["client_id"] != row["client_id"]]
             if unknown:
                 raise ExecutionSafetyError("unresolved previous submission fences new entry")
         self._fence()
@@ -307,9 +331,10 @@ class ExecutionCoordinator:
                    "side": fill.side.value, "qty": fill.qty, "price": fill.price,
                    "fee": fill.fee, "cause": cause.value,
                    "executed_trigger": p["request"]["kind"] == "TRIGGER"}
-        inserted = self.store.append_receipt(trade_key, receipt)
-        if inserted:
-            self.j.append_fill({"venue_trade_id": trade_key, "client_id": cid if row else None,
+        self.store.append_receipt(trade_key, receipt)
+        # Verify the full normalized fill on duplicates too: timestamps
+        # are journal provenance even though receipt matching uses bars.
+        self.j.append_fill({"venue_trade_id": trade_key, "client_id": cid if row else None,
                                 "venue_order_id": fill.venue_order_id, "ts": fill.ts, "side": fill.side.value,
                                 "qty": fill.qty, "price": fill.price, "fee": fill.fee, "cause": cause.value,
                                 "target_bar_index": p["expected_ledger_bar_index"], "cls": p["receipt_mode"]})

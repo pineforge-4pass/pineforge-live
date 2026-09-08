@@ -34,7 +34,7 @@ exchange order or deployment has been created.
 
 Baseline: 315 engine-backed tests passed before edits, using engine checkout
 `41c9c741d2b4f20eb793655bef4e9c56357a97fe` with built ABI-v4 corpus libraries.
-Current local suite: **644 passed with engine**; **522 passed, 122 skipped
+Current local suite: **654 passed with engine**; **530 passed, 124 skipped
 without engine**. Scoped pyflakes and `git diff --check` pass.
 
 Independent Codex review reproduced four atomicity defects during development:
@@ -65,3 +65,16 @@ The offline replay explicitly does not fabricate those observations.
 The previously recorded publication decisions remain untouched: LICENSE and
 package metadata, public repository/origin, public design spec, engine release
 pin, and security contact. No push is authorized by this continuation.
+
+## Independent Grok review and corrections
+
+Grok reviewed `e85b9fec640202abccb00bf0bf1153fceb069651` independently and
+returned CHANGES_REQUIRED (P0=0, P1=3, P2=2). The five findings were reproduced
+and fixed: notice withdrawals are scoped by leg; pending closes remain
+parents across ingestion boundaries; aborted core operations do not consume
+decision ids; order-state progression is monotonic; terminal rejections stay
+explicit residuals without being mislabeled unresolved submissions. Ten
+regression cases cover these paths, including an ACKED market close queued
+after its entry. Duplicate fills now also verify their original timestamp
+without advancing a conflicting history cursor. A new exact-candidate Grok
+review follows these corrections.

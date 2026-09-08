@@ -169,3 +169,36 @@ def test_drained_lease_release_keeps_monotonic_tokens_and_fences_old_owner(tmp_p
     with pytest.raises(LeaseLost):
         first.release(12)
     assert second.token == 2 and not second.expired(12)
+
+
+def test_aborted_settle_keeps_its_decision_id_retryable(test_so, test_feed, tmp_path, monkeypatch):
+    from pineforge_live.core.ledger import RecomputeAborted
+    r = runtime(test_so, tmp_path)
+    bars = load_bars(test_feed, 2001)
+    r.seed(bars[:2000])
+    original = r.core.ledger.settle
+    monkeypatch.setattr(r.core.ledger, 'settle', lambda *args: (_ for _ in ()).throw(RecomputeAborted()))
+    failed = r.settle('bar', bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    assert not failed.completed and not failed.duplicate and not r.poisoned
+    assert r.j._exec('SELECT COUNT(*) FROM core_decisions').fetchone()[0] == 0
+    assert r.j.settlement(r.epoch, 2000) is None
+    monkeypatch.setattr(r.core.ledger, 'settle', original)
+    retried = r.settle('bar', bars[2000], [], set(), set(), -1.0, 0, our_signed_fills=-1.0)
+    assert retried.completed and not retried.duplicate and retried.output.settle.bar_index == 2000
+
+
+def test_aborted_evaluate_keeps_its_decision_id_retryable(test_so, test_feed, tmp_path, monkeypatch):
+    from pineforge_live.core.probe import ProbeResult
+    r = runtime(test_so, tmp_path)
+    bars = load_bars(test_feed, 2001)
+    r.seed(bars[:2000])
+    forming = replace(bars[2000], is_forming=True)
+    original = r.core.probe.evaluate
+    monkeypatch.setattr(r.core.probe, 'evaluate', lambda *a, **kw:
+                        ProbeResult(2000, forming, [], [], [], {}, False, 0, False, aborted=True))
+    failed = r.evaluate('tick', forming, forming.ts_open)
+    assert not failed.completed and not failed.duplicate and not r.poisoned
+    assert r.j._exec('SELECT COUNT(*) FROM core_decisions').fetchone()[0] == 0
+    monkeypatch.setattr(r.core.probe, 'evaluate', original)
+    retried = r.evaluate('tick', forming, forming.ts_open)
+    assert retried.completed and not retried.duplicate and not retried.output.probe.aborted
