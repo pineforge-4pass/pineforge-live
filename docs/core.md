@@ -97,10 +97,17 @@ Spec §4 evaluate 1–4:
 3. Intrabar level refresh for settled intents under the epoch's
    `trail_refresh_policy` (`intrabar_best` or `bar_open_level`).
 4. The first `evaluate()` of a new bar yields the settled book's MARKET fills
-   at that open — which `settle()` has already requested as
-   `MARKET_AT_OPEN`, so the two are de-duplicated: a `(intent, leg)` already
-   asked for at this bar's open is not TRIGGERed again, and a `(intent, leg)`
-   is TRIGGERed at most once per bar however many ticks arrive.
+   at that open. `settle(n)` has already requested those as `MARKET_AT_OPEN`
+   for bar `n+1` — priced off the only price it had, bar `n`'s close — so this
+   evaluate does not TRIGGER them a second time: it **supersedes** them,
+   re-emitting the same `(intent, leg, target_bar_index)` as a
+   `MARKET_AT_OPEN` carrying the engine's own qty *at the open*
+   (`reason="open_requote"`), which is the qty the spec actually specifies and
+   which B3 cannot re-derive afterwards (the handle's accessors describe its
+   LAST run). The settle-time request is the advance notice that lets B3 have
+   an order in place at the open; the re-quote fixes its size. A
+   `(intent, leg)` is otherwise TRIGGERed at most once per bar however many
+   ticks arrive.
 
 ## Fill classes and the reconcile table
 
@@ -120,16 +127,32 @@ about it (spec §5.4). Corrections are bounded by `ReconcileConfig`
 | `PATH_DIVERGENT` | venue and ledger closed the same cycle via different legs, net equal | continue; counterfactual journaled; G3 input |
 | `MIRROR_EARLY` | venue filled a mirrored level the ledger did not fill this bar | hold flat, retain the intent; per-day cap → `STOP(FLAT_ONLY)` |
 | `TRIGGER_REVERSED` / `ENTRY_SLIP` | our executed TRIGGER against a flat/opposite ledger; entry beyond the slip budget | reduce-only flatten, then `STOP(FLAT_ONLY)` |
-| `RETRACTED` / `UNATTRIBUTED_VENUE` | a venue fill with no emulated counterpart | `STOP(FLAT_ONLY)` (auto-correction is opt-in) |
+| `RETRACTED` | one of OUR fills the ledger never emulated (a TRIGGER the settled recompute no longer produces) | `STOP(FLAT_ONLY)` (auto-correction is opt-in) |
+| `UNATTRIBUTED_VENUE` | a **venue-initiated** fill — liquidation, ADL, a manual trade: not ours at all | `STOP(HARD, FLATTEN)` |
 
 Above the table: if the account position disagrees with our own fill basis by
 more than the dead-band, the reconciler cannot trust its own fill tracking on
 that call — it escalates `STOP(FLAT_ONLY)` (`account_mismatch`) and skips
-every `MISSED`/`QTY_DIVERGENT` correction. A venue-initiated fill
-(liquidation, ADL) is `STOP(HARD, FLATTEN)`.
+every `MISSED`/`QTY_DIVERGENT` correction.
+
+**The account contract is strict.** `real_position` must be the venue's own
+snapshot *event-time after the last fill in `venue_fills`* — spec §5.4's
+wording, taken literally. The core does not tolerate a snapshot one bar behind
+the fills it is handed alongside: a driver that reports the pre-fill position
+*is* an `account_mismatch`, and saying so is the whole point of the secondary
+check. B3 therefore either reads the account after the fill stream has drained
+or advances the last snapshot by `live.signed_qty(venue_fills)` itself (the
+same OURS-filtered sum `settle()` derives its primary basis from — one
+definition, not two). `scripts/l1_harness.py`'s perfect venue does exactly the
+latter.
 
 `CorrectionRequest.kind` is one of `MARKET_CORRECT`, `REDUCE_ONLY_TRIM`,
-`TOP_UP`, `FLATTEN`.
+`TOP_UP`, `FLATTEN`, and every one carries its own `reduce_only`: only
+`reconcile` knows whether a `MARKET_CORRECT` is repairing a missed ENTRY
+(exposure-increasing) or a missed EXIT (reduce-only), so the flag travels on
+the request rather than being re-derived from `kind` downstream — re-deriving
+it made `permits()` refuse, under `FLAT_ONLY`, the one order `FLAT_ONLY`
+exists to allow.
 
 ## STOP semantics
 
@@ -179,7 +202,7 @@ target_bar_index)`.
 | kind | when | notes |
 |---|---|---|
 | `TRIGGER` | `evaluate` | an intrabar fill both paths confirmed; `price_hint` is the probe's own fill price |
-| `MARKET_AT_OPEN` | `settle` | a MARKET resting in the settled book, filling at bar `n+1`'s open. `price_hint` is `None` — the open *is* the price (no fallback; B3 waits `open_wait_ms` for it). An order that reverses a live position is TWO legs: a reduce-only close, then the engine's own opened qty |
+| `MARKET_AT_OPEN` | `settle` **and** `evaluate` | a MARKET resting in the settled book, filling at bar `n+1`'s open. `price_hint` is `None` — the open *is* the price (no fallback; B3 waits `open_wait_ms` for it). An order that reverses a live position is TWO legs: a reduce-only close, then the engine's own opened qty. `settle(n)` emits it as advance notice; the first `evaluate()` of bar `n+1` emits it again with `reason="open_requote"` and the engine's open-priced qty — a **supersede**, not a second order (see below) |
 | `SYNTHETIC_CLOSE` | `settle` | an engine-forced close (margin call / intraday cap), reduce-only |
 | `CORRECTION` | `settle` | a reconciler `MARKET_CORRECT` / `REDUCE_ONLY_TRIM` / `TOP_UP`; `cls` names which |
 | `FLATTEN` | `settle` | reduce real exposure to zero (`TRIGGER_REVERSED`, `ENTRY_SLIP`) |
@@ -189,6 +212,27 @@ target_bar_index)`.
 identity a venue fill is matched back against, so the request → fill →
 classification round trip only closes in that id space. The intent *key* for a
 book op is in `CoreOutput.book` / `book_diff`, keyed by `IntentKey.s`.
+
+**The supersede contract.** A later `ActionRequest` for the same `(intent,
+leg, target_bar_index)` — `leg` being `"EXIT"` when `reduce_only` else
+`"ENTRY"`, the same pairing the classifier matches on — **replaces** the
+earlier one. B3 submits (or amends to) the last one, and the venue fills it
+once, not once per request. The one producer today is the `open_requote` pair
+above; an executor that treated the two as separate orders would double every
+entry and reversal, and the resulting position, being neither side's,
+reconciles as `unreconcilable_sides` → `STOP(FLAT_ONLY)`.
+
+**Open question B3 must answer: *when* a settle-emitted action can be matched.**
+`SYNTHETIC_CLOSE`, `CORRECTION` and `FLATTEN` are emitted by `settle(n)` with
+`target_bar_index = n`, but bar `n` is already closed — a venue can only
+report their fills during bar `n+1`, where `classify_bar`'s identity match
+(`venue_fill.target_bar_index == emulated_fill.bar_index`) will not find an
+`n`-indexed fill among bar `n+1`'s emulated fills. B2 does not resolve this:
+the core is called *with* the fills and cannot know when they were reported.
+B3 must define the submit-now / match-at-`n+1` rule explicitly — either by
+carrying the origin bar alongside the matching bar, or by holding such fills
+for the settlement that owns them — and until it does, a driver echoing them
+back at `n+1` sees `UNATTRIBUTED_VENUE`.
 
 What B3 owns and the core deliberately does not: client ids and `action_seq`,
 the order state machine and adoption, mirror sync (`level_version`, dead-band,
@@ -201,6 +245,23 @@ declares but nothing here can sample.
 ## Proving it: the L1 harness
 
 `scripts/l1_harness.py` runs this cadence over a recorded feed against a
-perfect venue and reports the two L1 assertions (spec §10.2) — G1 at every
-settlement plus a reference-run cross-check, and *probe ⊆ settlement ∪
-retracted*. See the README for the command and the current numbers.
+perfect venue and reports the two L1 assertions (spec §10.2):
+
+- **G1** — checked by the ledger at every settlement, and then *independently*
+  by an end-of-run reference pass that compares the final recompute's hash
+  vector and trade prefixes against what each settlement journaled at the
+  time. (The harness's per-bar read-back of the `n−1` row is not independent:
+  `Ledger.settle` compares that same row before journaling and raises
+  otherwise, so it can only ever agree.)
+- **probe ≡ recompute** — every probe fill is a fill of that bar's own
+  settlement or was retracted by a *later* evaluate on the same bar, read in
+  tick order (fill → retract → fill leaves the fill standing, and it must
+  settle). Path-variant fills are excluded: only `P_auto` confirmed them, so
+  they settle as `PATH_DIVERGENT` — a classification, not an L1 failure.
+
+Its perfect venue honours the supersede contract and the strict account
+contract above, so those are exercised rather than assumed. A STOP anywhere in
+the window, any incident, or any non-`CONFIRMED` classification is reported per
+bar and in the summary, and a STOP exits non-zero: a STOP mid-window refuses
+actions and silently changes the very stream the two assertions are about. See
+the README for the command and the current numbers.
