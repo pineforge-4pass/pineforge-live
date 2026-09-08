@@ -9,28 +9,41 @@ assertions saw:
 
 * **G1 (prefix stability, spec §1).** Every settlement re-checks the
   previous bar's hash/trades/bars digests against the journal (the
-  ledger's own check, `STOP(HARD, HOLD)` on failure), and this harness
-  re-reads the journaled `broker_state_hash` for bar n−1 independently
-  after each settle. At the end the FINAL run stands in for spec §10.2's
-  reference run `R`: `R.hash[m]` and `R`'s trade prefix at `m` are
-  compared against what every `L_m` journaled at the time.
+  ledger's own check, `STOP(HARD, HOLD)` on failure). At the end the FINAL
+  run stands in for spec §10.2's reference run `R`: `R.hash[m]` and `R`'s
+  trade prefix at `m` are compared against what every `L_m` journaled at
+  the time. That end-of-run pass is the INDEPENDENT check -- the per-bar
+  journal read-back this harness also does is not, since `Ledger.settle`
+  compares the same row before journaling and raises otherwise, so it can
+  only ever agree.
 * **probe ≡ recompute (spec §10.2).** Every probe fill must be either a
   fill of that bar's own settlement (same `(intent, leg, is_long)`) or
-  retracted by a later `evaluate()` on the same bar. Anything else is
-  counted as `probe_not_settled`.
+  retracted by a LATER `evaluate()` on the same bar. Anything else is
+  counted as `probe_not_settled`. "Later" is read in tick order: fill ->
+  retract -> fill leaves the fill STANDING at the close and it must be
+  settled (see `fold_probe`). Path-variant fills are excluded -- a fill
+  only `P_auto` confirmed is by definition not both-path-confirmed and
+  settles as `PATH_DIVERGENT`, a classification rather than an L1 failure.
 
-The exit code is the verdict: 0 only when `g1_failures` and
-`probe_not_settled` are both 0.
+The exit code is the verdict: 0 only when `g1_failures`,
+`probe_not_settled` and `stops` are all 0. A STOP mid-window refuses
+actions and silently changes the very stream the two assertions are
+about, so it can never be a passing run.
 
 **The perfect venue.** It echoes every fill-producing action back as a
 fill on the bar it was requested on -- a `TRIGGER` at the probe's own
 price, a settled `MARKET_AT_OPEN` leg at the bar's open -- and reports the
 account position event-time AFTER those fills (`prev + Σ signed qty`,
-never the pre-settle ledger position, which is what spec §5.4 means by "position
-snapshot event-time after the last fill"). `our_signed_fills` is left for
-`LiveCore` to derive, so the harness exercises that derivation rather than
-feeding it the answer. A cancel is not a fill and is never echoed. The
-venue is named `"TAPE"` throughout: no real exchange name appears here.
+never the pre-settle ledger position, which is what spec §5.4 means by
+"position snapshot event-time after the last fill"). It honours
+`ActionRequest`'s SUPERSEDE contract first (`supersede`): a later request
+for the same `(intent, leg, target_bar_index)` replaces the earlier one,
+so the open re-quote `evaluate()` emits for a MARKET leg the preceding
+settlement asked for in advance is filled ONCE, not twice.
+`our_signed_fills` is left for `LiveCore` to derive, so the harness
+exercises that derivation rather than feeding it the answer. A cancel is
+not a fill and is never echoed. The venue is named `"TAPE"` throughout: no
+real exchange name appears here.
 
 Usage:
 
@@ -47,6 +60,7 @@ import json
 import math
 import sys
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # runnable from a checkout, installed or not
@@ -55,10 +69,10 @@ from pineforge_live import types as T                                           
 from pineforge_live.adapters.tape import TapeTickSource, load_feed_csv             # noqa: E402
 from pineforge_live.bars import FormingBarBuilder                                  # noqa: E402
 from pineforge_live.bars.policy import tf_ms                                       # noqa: E402
-from pineforge_live.core.classify import VenueFill, emulated_from_settle           # noqa: E402
+from pineforge_live.core.classify import FillClass, VenueFill                      # noqa: E402
 from pineforge_live.core.ids import keys_sha256                                    # noqa: E402
-from pineforge_live.core.ledger import BarsDivergence, LedgerDivergence, LedgerGap  # noqa: E402
-from pineforge_live.core.live import LiveCore                                      # noqa: E402
+from pineforge_live.core.ledger import BarsDivergence, LedgerDivergence            # noqa: E402
+from pineforge_live.core.live import LiveCore, signed_qty                          # noqa: E402
 from pineforge_live.core.reconcile import DeadBand                                 # noqa: E402
 from pineforge_live.core.riskguard import Breaker, RiskLimits, n_min_for           # noqa: E402
 from pineforge_live.epoch import RuntimeConfig                                     # noqa: E402
@@ -67,14 +81,23 @@ from pineforge_live.harness import make_handle, open_journal, tape_spec         
 #: Deliberately wide: an L1 run measures G1 and probe-equivalence, not risk
 #: policy, and a budget refusal would silently change the action stream the
 #: two assertions are about. `max_fill_actions_per_bar` is the one that
-#: stays meaningful (spec §4: "≤ P's fill count").
-LIMITS = RiskLimits(1e6, 1e12, 1e9, 8, 32, 1e9, 50, 60_000, 60_000, 3, 2, 2.0, 1.0, 5_000)
+#: stays meaningful (spec §4: "≤ P's fill count") -- named here so that
+#: claim is checkable rather than positional.
+LIMITS = RiskLimits(max_abs_position=1e6, max_notional=1e12, max_order_notional=1e9,
+                    max_fill_actions_per_bar=8, max_book_ops_per_bar=32,
+                    max_daily_realized_loss=1e9, max_daily_reconciles=50,
+                    stale_feed_ms=60_000, stale_eval_ms=60_000, bar_mismatch_streak=3,
+                    disagree_twice=2, unexplained_divergence_pct=2.0,
+                    liquidation_distance_pct_min=1.0, recompute_ms_p99_max=5_000)
 DEAD_BAND = DeadBand(0.001, 0.001, 5.0)
 BREAKERS = [Breaker("orphan", 0.01, 500, n_min_for(0.01), 5)]
 RUNTIME_CONFIG = RuntimeConfig(poll_interval_ms=30_000, drain_bound_ms=5_000, grace_ms=3_000,
                               open_wait_ms=2_000, risk_limits={})
 #: A cancel carries no qty and produces no fill; every other action kind does.
 NON_FILL_ACTIONS = frozenset({"CANCEL_STALE_CYCLE"})
+#: The divergences that leave the ledger un-advanced, so every later bar is
+#: a `LedgerGap` by construction and there is nothing left to measure.
+FATAL_INCIDENTS = frozenset({"ledger_divergence", "bars_divergence"})
 
 
 def percentile(values: list[int], q: float) -> int:
@@ -90,19 +113,40 @@ def percentile(values: list[int], q: float) -> int:
     return s[min(len(s) - 1, max(0, math.ceil(q * len(s)) - 1))]
 
 
-def ticks_for(bar: T.NormalizedBar, tf: str, policy: str, seed: int, instrument) -> list[T.NormalizedTick]:
+def ticks_for(runner: asyncio.Runner, bar: T.NormalizedBar, tf: str, policy: str, seed: int,
+              instrument) -> list[T.NormalizedTick]:
     """The tape's ticks for one bar under `policy` (`path4` prints exactly
-    at the k = 4 probe points spec §10.2 names)."""
+    at the k = 4 probe points spec §10.2 names). One event loop is shared
+    by the whole run (`runner`) rather than built and torn down per bar."""
     src = TapeTickSource([bar], tf, policy=policy, seed=seed)
 
     async def go():
         return [e.tick async for e in src.subscribe(instrument, 0) if isinstance(e, T.Tick)]
 
-    return asyncio.run(go())
+    return runner.run(go())
 
 
-def echo(actions, bar: T.NormalizedBar, bar_index: int) -> list[VenueFill]:
-    """The perfect venue's fills for one bar's requested actions.
+def supersede(actions: list) -> list:
+    """The requests a venue should actually hold, per `ActionRequest`'s
+    SUPERSEDE contract: a later request for the same `(intent, leg,
+    target_bar_index)` REPLACES the earlier one, so only the last per key
+    survives -- in the order the key was first seen.
+
+    The producer in this cadence is spec §4 settle 6's MARKET leg:
+    `settle(n)` requests it in advance priced off the only price it has
+    (bar n's close) and the first `evaluate()` of bar n+1 re-quotes it with
+    the engine's qty at the OPEN (`reason="open_requote"`). They are ONE
+    order. A venue that filled both would double every entry and reversal
+    -- and the resulting position, being neither side's, reconciles as
+    `unreconcilable_sides` -> `STOP(FLAT_ONLY)`."""
+    by_key: dict[tuple, object] = {}
+    for a in actions:
+        by_key[(a.intent, "EXIT" if a.reduce_only else "ENTRY", a.target_bar_index)] = a
+    return list(by_key.values())
+
+
+def echo(actions: list, bar: T.NormalizedBar, bar_index: int) -> list[VenueFill]:
+    """The perfect venue's fills for one bar's `supersede`d actions.
 
     Each action's own `target_bar_index` is carried through verbatim
     rather than rewritten to this bar: that field is what
@@ -121,8 +165,45 @@ def echo(actions, bar: T.NormalizedBar, bar_index: int) -> list[VenueFill]:
     return fills
 
 
-def signed(fills: list[VenueFill]) -> float:
-    return sum((f.qty if f.side is T.Side.BUY else -f.qty) for f in fills)
+@dataclass
+class ProbeTally:
+    """One bar's probe outcomes folded in TICK ORDER.
+
+    `state` is the LAST thing each `(intent, leg, is_long)` was seen as --
+    `"fill"` or `"retracted"` -- which is what ruling 2's "retracted by a
+    LATER evaluate" means: fill -> retract -> fill leaves the fill standing
+    at the close of the bar and it must be settled, while a bar-wide
+    `retracted` union would excuse it. `fills`/`retracts` stay unions:
+    they are the run's tallies of what the probe reported, not the
+    assertion. `path_variants` are sigs some tick reported as
+    `path_variant` (P_auto only, kept because they close a cycle) -- not
+    both-path-confirmed, so outside the assertion (spec §4 evaluate 2)."""
+    state: dict[tuple, str] = field(default_factory=dict)
+    fills: set = field(default_factory=set)
+    retracts: set = field(default_factory=set)
+    path_variants: set = field(default_factory=set)
+
+    def owed(self, settled: set) -> set:
+        """The sigs the bar's settlement still owes: standing at the close,
+        not produced by the settlement, not a path variant."""
+        return {s for s, st in self.state.items() if st == "fill"} - settled - self.path_variants
+
+
+def fold_probe(results) -> ProbeTally:
+    """Fold one bar's `ProbeResult`s (in tick order) into a `ProbeTally`.
+    Within one result `fills` and `retracted` are disjoint, so applying
+    fills then retracted preserves the order the probe reported them in."""
+    t = ProbeTally()
+    for r in results:
+        for f in r.fills:
+            t.state[f.sig] = "fill"
+            t.fills.add(f.sig)
+            if f.path_variant:
+                t.path_variants.add(f.sig)
+        for f in r.retracted:
+            t.state[f.sig] = "retracted"
+            t.retracts.add(f.sig)
+    return t
 
 
 def sig(x) -> list:
@@ -130,6 +211,11 @@ def sig(x) -> list:
     `ProbeFill.sig` uses and `EmulatedFill` carries field by field, which
     is what "the probe's fill IS this settlement's fill" means."""
     return [x.intent, x.leg, x.is_long]
+
+
+def action_json(a) -> dict:
+    return {"kind": a.kind, "intent": a.intent, "qty": a.qty, "reduce_only": a.reduce_only,
+            "target_bar_index": a.target_bar_index, "reason": a.reason}
 
 
 def run(args) -> tuple[dict, int]:
@@ -144,6 +230,13 @@ def run(args) -> tuple[dict, int]:
     spec = tape_spec(args.tf, so=args.so)
     handle = make_handle(args.so, spec)
     journal, marker = open_journal(args.journal_dir)
+    try:
+        return _cadence(args, spec, handle, journal, marker, feed)
+    finally:
+        journal.close()
+
+
+def _cadence(args, spec, handle, journal, marker, feed) -> tuple[dict, int]:
     core = LiveCore(handle, spec, journal, marker, RUNTIME_CONFIG, LIMITS, DEAD_BAND, BREAKERS)
 
     seeded = core.seed(feed[:args.start])
@@ -154,81 +247,102 @@ def run(args) -> tuple[dict, int]:
     # ledger at bar 0 would be an `account_mismatch` STOP on bar 1 that has
     # nothing to do with G1.
     real_position = seeded.settle.position_size
-    prev_book, owed = seeded.book, []
+    owed: list = []
 
     bars_out, settle_ms, probe_ms_all, g1_failed = [], [], [], set()
     settled_indices: list[int] = []
     aborted_at = None
 
-    for i in range(args.start, args.start + args.bars):
-        bar = feed[i]
-        builder = FormingBarBuilder(spec.script_tf)
-        probe_sigs, retract_sigs, bar_probe_ms = set(), set(), []
-        pending = list(owed)
-        for tick in ticks_for(bar, spec.script_tf, args.policy, args.seed, spec.instrument):
-            builder.push(tick)
-            ev = core.evaluate(builder.forming(), now_ms=tick.ts)
-            bar_probe_ms.append(ev.probe.recompute_ms)
-            probe_sigs |= {f.sig for f in ev.probe.fills}
-            retract_sigs |= {f.sig for f in ev.probe.retracted}
-            pending += ev.actions
+    with asyncio.Runner() as runner:
+        for i in range(args.start, args.start + args.bars):
+            bar = feed[i]
+            builder = FormingBarBuilder(spec.script_tf)
+            results, bar_probe_ms = [], []
+            pending = list(owed)
+            for tick in ticks_for(runner, bar, spec.script_tf, args.policy, args.seed, spec.instrument):
+                builder.push(tick)
+                ev = core.evaluate(builder.forming(), now_ms=tick.ts)
+                bar_probe_ms.append(ev.probe.recompute_ms)
+                results.append(ev.probe)
+                pending += ev.actions
+            probe = fold_probe(results)
 
-        venue = echo(pending, bar, i)
-        real_position += signed(venue)
-        row = {"bar_index": i, "ts_open": bar.ts_open, "g1": "ok", "settle_recompute_ms": None,
-               "probe_recompute_ms": bar_probe_ms, "probe_fills": sorted(probe_sigs), "retracts": sorted(retract_sigs),
-               "settle_fills": [], "probe_not_settled": [], "actions": [], "stop": None,
-               "incidents": [], "venue_fills": len(venue), "real_position": real_position}
-        probe_ms_all += bar_probe_ms
-        try:
-            out = core.settle(bar, venue_fills=venue, in_flight=set(), mirrored=set(),
-                              real_position=real_position, now_ms=bar.ts_open + tf_ms(spec.script_tf))
-        except (LedgerDivergence, BarsDivergence, LedgerGap) as e:
-            # Ruling 3: record it and go to the summary. The ledger did not
-            # advance, so every later bar would be a gap -- there is nothing
-            # left to measure after this.
-            row["g1"] = f"raised:{type(e).__name__}:{e}"
-            g1_failed.add(i); bars_out.append(row); aborted_at = i
-            break
-
-        row["incidents"] = [x["kind"] for x in out.incidents]
-        row["stop"] = list(out.stop[:2]) + [out.stop[2]] if out.stop else None
-        if out.settle is None:
-            # LiveCore swallows a divergence into a STOP + incident rather
-            # than raising; same conclusion as the except branch above.
-            row["g1"] = "diverged:" + ",".join(row["incidents"])
-            if {"ledger_divergence", "bars_divergence"} & set(row["incidents"]):
+            # M1: one order per supersede key reaches the venue.
+            held = supersede(pending)
+            venue = echo(held, bar, i)
+            # The account moves by the CORE's own definition of "our signed
+            # fills" (`signed_qty`, OURS-filtered): the harness echoes only
+            # OURS fills, so the filter is a no-op here, but two spellings
+            # of that quantity is exactly the drift `real_position` exists
+            # to detect.
+            real_position += signed_qty(venue)
+            row = {"bar_index": i, "ts_open": bar.ts_open, "g1": "ok", "settle_recompute_ms": None,
+                   "probe_recompute_ms": bar_probe_ms, "probe_fills": sorted(probe.fills),
+                   "retracts": sorted(probe.retracts), "path_variant": sorted(probe.path_variants),
+                   "settle_fills": [], "probe_not_settled": [], "actions": [],
+                   "venue_echo": [action_json(a) for a in held], "superseded": len(pending) - len(held),
+                   "stop": None, "incidents": [], "non_confirmed": [],
+                   "venue_fills": len(venue), "real_position": real_position}
+            probe_ms_all += bar_probe_ms
+            # A `LedgerGap` is NOT caught: it means the harness handed the
+            # core the wrong bar (spec §2's carry-forward is the bar
+            # layer's job), i.e. a harness bug, and it must be loud.
+            try:
+                out = _settle_with_one_retry(core, bar, venue, real_position, spec)
+            except (LedgerDivergence, BarsDivergence) as e:
+                row["g1"] = f"raised:{type(e).__name__}:{e}"
                 g1_failed.add(i)
-            bars_out.append(row); aborted_at = i
-            break
+                bars_out.append(row)
+                aborted_at = i
+                break
 
-        s = out.settle
-        settled_indices.append(s.bar_index)
-        settle_ms.append(s.recompute_ms)
-        row["settle_recompute_ms"] = s.recompute_ms
-        # An independent read-back of the journal's own record for bar n-1
-        # (the ledger checked the same thing before journaling; this proves
-        # what LANDED, not just what the run computed).
-        prev_row = journal.settlement(spec.epoch_hash(), s.bar_index - 1)
-        if prev_row is None or int(prev_row["broker_state_hash"]) != s.hashes[s.bar_index - 1]:
-            row["g1"] = "journal_hash_mismatch"
-            g1_failed.add(i)
+            row["incidents"] = [x["kind"] for x in out.incidents]
+            row["stop"] = [out.stop[0].value, out.stop[1].value, out.stop[2]] if out.stop else None
+            row["non_confirmed"] = sorted(c.cls.value for c in out.classified if c.cls is not FillClass.CONFIRMED)
+            if out.settle is None:
+                # LiveCore swallows a divergence into a STOP + incident
+                # rather than raising; same conclusion as the except branch.
+                # A `recompute_aborted` that survived the retry is counted
+                # and the run continues (nothing was journaled and the
+                # ledger is untouched, so it is not a divergence) -- the
+                # next bar's `LedgerGap` will then say so out loud.
+                row["g1"] = "diverged:" + ",".join(row["incidents"])
+                g1_failed.add(i)
+                bars_out.append(row)
+                if FATAL_INCIDENTS & set(row["incidents"]):
+                    aborted_at = i
+                    break
+                continue
 
-        settled = emulated_from_settle(s, out.book_diff, prev_book)
-        settled_sigs = {(e.intent, e.leg, e.is_long) for e in settled}
-        row["settle_fills"] = [sig(e) for e in settled]
-        row["actions"] = [{"kind": a.kind, "intent": a.intent, "qty": a.qty, "reduce_only": a.reduce_only,
-                           "target_bar_index": a.target_bar_index} for a in out.actions]
-        # Ruling 2 / spec §10.2: probe fills ⊆ settlement fills ∪ PROBE_RETRACT.
-        row["probe_not_settled"] = sorted(list(p) for p in (probe_sigs - settled_sigs - retract_sigs))
-        bars_out.append(row)
+            s = out.settle
+            settled_indices.append(s.bar_index)
+            settle_ms.append(s.recompute_ms)
+            row["settle_recompute_ms"] = s.recompute_ms
+            # A read-back of the journal's own record for bar n-1. NOT an
+            # independent check (n3): `Ledger.settle` compares `s.hashes[m]`
+            # against this same row before journaling and raises otherwise,
+            # so this branch cannot fire unless the `except` above already
+            # did. Kept as a cheap assertion that what LANDED is what the
+            # run computed; the INDEPENDENT check is the reference pass.
+            prev_row = journal.settlement(spec.epoch_hash(), s.bar_index - 1)
+            if prev_row is None or int(prev_row["broker_state_hash"]) != s.hashes[s.bar_index - 1]:
+                row["g1"] = "journal_hash_mismatch"
+                g1_failed.add(i)
 
-        prev_book = out.book
-        owed = [a for a in out.actions if a.kind not in NON_FILL_ACTIONS]
+            settled_sigs = {(c.emulated.intent, c.emulated.leg, c.emulated.is_long)
+                            for c in out.classified if c.emulated is not None}
+            row["settle_fills"] = sorted(list(x) for x in settled_sigs)
+            row["actions"] = [action_json(a) for a in out.actions]
+            # Ruling 2 / spec §10.2: probe fills ⊆ settlement fills ∪ PROBE_RETRACT.
+            row["probe_not_settled"] = sorted(list(p) for p in probe.owed(settled_sigs))
+            bars_out.append(row)
+
+            owed = [a for a in out.actions if a.kind not in NON_FILL_ACTIONS]
 
     # Spec §10.2's reference run: the LAST recompute covers every settled
     # bar, so its own hash vector and trade prefixes are checked against
     # what each L_m journaled at the time -- one pass, no extra recompute.
+    # This is the harness's INDEPENDENT G1 check (see the module docstring).
     reference = {"bars_checked": 0, "hash_mismatches": [], "prefix_mismatches": []}
     final = core.ledger.last
     if final is not None:
@@ -236,11 +350,12 @@ def run(args) -> tuple[dict, int]:
             reference["bars_checked"] += 1
             jr = journal.settlement(spec.epoch_hash(), m)
             if jr is None or int(jr["broker_state_hash"]) != final.hashes[m]:
-                reference["hash_mismatches"].append(m); g1_failed.add(m)
+                reference["hash_mismatches"].append(m)
+                g1_failed.add(m)
                 continue
             if keys_sha256([k for k in final.keys if k.exit_bar <= m]) != jr["trades_sha256"]:
-                reference["prefix_mismatches"].append(m); g1_failed.add(m)
-    journal.close()
+                reference["prefix_mismatches"].append(m)
+                g1_failed.add(m)
 
     summary = {
         "bars": len(bars_out),
@@ -248,6 +363,11 @@ def run(args) -> tuple[dict, int]:
         "probe_fills": sum(len(b["probe_fills"]) for b in bars_out),
         "retracts": sum(len(b["retracts"]) for b in bars_out),
         "probe_not_settled": sum(len(b["probe_not_settled"]) for b in bars_out),
+        "path_variant": sum(len(b["path_variant"]) for b in bars_out),
+        "superseded": sum(b["superseded"] for b in bars_out),
+        "stops": sum(1 for b in bars_out if b["stop"] is not None),
+        "incidents": sum(len(b["incidents"]) for b in bars_out),
+        "non_confirmed": sum(len(b["non_confirmed"]) for b in bars_out),
         "g1_failures": len(g1_failed),
         "recompute_ms_p99_settle": percentile(settle_ms, 0.99),
         "recompute_ms_p99_probe": percentile(probe_ms_all, 0.99),
@@ -267,8 +387,28 @@ def run(args) -> tuple[dict, int]:
         "aborted_at": aborted_at,
         "bars": bars_out,
     }
-    failed = summary["g1_failures"] or summary["probe_not_settled"] or aborted_at is not None
+    # A STOP mid-window refuses actions and changes the very stream the two
+    # assertions are about, so it can never be a passing run (m1).
+    failed = (summary["g1_failures"] or summary["probe_not_settled"] or summary["stops"]
+              or aborted_at is not None)
     return report, (1 if failed else 0)
+
+
+def _settle_with_one_retry(core: LiveCore, bar, venue, real_position, spec):
+    """Settle `bar`, retrying it ONCE on `recompute_aborted`.
+
+    A `RecomputeAborted` journals nothing and leaves the ledger untouched
+    (`Ledger.settle` commits its staged state last), so the same bar --
+    same venue fills, same account snapshot, none of which were consumed
+    -- can simply be settled again. It is not a G1 failure and not a
+    divergence; only a second abort is recorded as one."""
+    for attempt in (1, 2):
+        out = core.settle(bar, venue_fills=venue, in_flight=set(), mirrored=set(),
+                          real_position=real_position, now_ms=bar.ts_open + tf_ms(spec.script_tf))
+        retryable = out.settle is None and not (FATAL_INCIDENTS & {x["kind"] for x in out.incidents})
+        if not retryable or attempt == 2:
+            return out
+    raise AssertionError("unreachable")
 
 
 def parse_args(argv=None):
@@ -314,6 +454,16 @@ def main(argv=None) -> int:
             print(f"l1: bar {b['bar_index']} probe fills neither settled nor retracted: {b['probe_not_settled']}")
         if b["g1"] != "ok":
             print(f"l1: bar {b['bar_index']} G1: {b['g1']}")
+        if b["stop"] is not None:
+            print(f"l1: bar {b['bar_index']} STOP {b['stop'][0]}/{b['stop'][1]}: {b['stop'][2]}")
+        if b["incidents"]:
+            print(f"l1: bar {b['bar_index']} incidents: {', '.join(b['incidents'])}")
+        if b["non_confirmed"]:
+            print(f"l1: bar {b['bar_index']} fills not CONFIRMED: {', '.join(b['non_confirmed'])}")
+        if b["path_variant"]:
+            print(f"l1: bar {b['bar_index']} path-variant probe fills (excluded from probe_not_settled): {b['path_variant']}")
+        if b["superseded"]:
+            print(f"l1: bar {b['bar_index']} superseded {b['superseded']} request(s) before the venue saw them")
     for m in report["reference_run"]["hash_mismatches"]:
         print(f"l1: reference run disagrees with journaled hash at bar {m}")
     for m in report["reference_run"]["prefix_mismatches"]:

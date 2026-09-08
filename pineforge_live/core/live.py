@@ -92,11 +92,21 @@ class CoreOutput:
     classified: list[ClassifiedFill] = field(default_factory=list)
 
 
-def _signed(venue_fills: list[VenueFill]) -> float:
+def signed_qty(venue_fills: list[VenueFill]) -> float:
     """The signed qty of the fills WE are responsible for in one batch:
     `+` for BUY, `-` for SELL, `FillCause.OURS` only (a liquidation/ADL/
-    manual fill is the venue's own action, never part of our basis)."""
+    manual fill is the venue's own action, never part of our basis).
+
+    Public because a driver (and `scripts/l1_harness.py`'s perfect venue)
+    has to move its account position by exactly the quantity `settle()`
+    derives its basis from -- two spellings of "the signed qty of our
+    fills" is precisely the drift `real_position` exists to detect."""
     return sum((v.qty if v.side is T.Side.BUY else -v.qty) for v in venue_fills if v.cause is T.FillCause.OURS)
+
+
+#: Pre-rename spelling, kept so an in-flight caller (or a monkeypatching
+#: test) that reached for the private name still resolves.
+_signed = signed_qty
 
 
 class LiveCore:
@@ -409,7 +419,7 @@ class LiveCore:
         price = bar.c
         band = self.dead_band.qty(price)
 
-        basis = self._advance_our_fills(_signed(venue_fills)) if our_signed_fills is None else our_signed_fills
+        basis = self._advance_our_fills(signed_qty(venue_fills)) if our_signed_fills is None else our_signed_fills
         classified = classify_bar(emulated, venue_fills,
                                   in_flight_intents=in_flight, mirrored_intents=mirrored, dead_band_qty=band,
                                   ledger_position=s.position_size, real_position=real_position,
