@@ -11,6 +11,26 @@ from pineforge_live.engine.handle import PATH_ORDER_AUTO, PATH_ORDER_HIGH_FIRST,
 from pineforge_live.engine.report import RunResult
 from .book import settled_book, dual_entry_guard, Intent
 
+# Kinds `_delta_fill` will match an unexplained position-delta fill's
+# resolved side against, per the task-4 review's M1 fix and its
+# `created_now` ruling: an opening/adding entry (or a partial/margin-call
+# reduction) is attributed to a resting ENTRY, MARKET, or same-side
+# RAW_ORDER intent -- never a kind=="EXIT" row (see `_delta_fill`'s
+# docstring for why).
+_ENTRYISH_KINDS = ("ENTRY", "MARKET", "RAW_ORDER")
+
+# Tolerance for "is this float delta/qty actually nonzero/different", not
+# just floating-point noise from the engine's own arithmetic -- matches
+# `ledger.py`'s `_result` (`position_delta` unexplained-residual check) and
+# `ledger.py`'s `entry_fills` construction, which this module mirrors.
+_EPS = 1e-12
+# Tolerance for "do P_auto and P_other actually disagree on qty" (m4):
+# looser than _EPS since a genuine qty disagreement (percent-of-equity
+# sizing diverging between the two intrabar paths) is orders of magnitude
+# larger than float noise; kept as its own constant so the two concerns
+# don't have to share one number.
+_QTY_EPS = 1e-9
+
 
 def path_order_other(forming: T.NormalizedBar) -> int:
     """The path order OPPOSITE the engine's own AUTO decision for `forming`
@@ -24,17 +44,30 @@ def path_order_other(forming: T.NormalizedBar) -> int:
 @dataclass(frozen=True)
 class ProbeFill:
     """One order's fill as seen by the probe: `key`-equivalent identity
-    (`intent`/`leg`/`is_long`/`qty`, mirroring `TradeKey`'s entry/exit
-    identity) plus the fill `price` and the bars it belongs to.
+    (`intent`/`leg`/`is_long`, mirroring `TradeKey`'s entry/exit identity)
+    plus the fill `qty`/`price` and the bars it belongs to.
     `path_variant=True` marks a fill that only P_auto produced (P_other
     disagreed) and that was kept anyway because it closes a cycle (see
-    `Probe.evaluate`)."""
-    intent: str; leg: str; is_long: bool; qty: float; price: float; entry_bar: int; exit_bar: int; path_variant: bool = False
+    `Probe.evaluate`). `qty_disagreement=True` marks a fill P_auto and
+    P_other both confirmed on `(intent, leg, is_long)` but disagreed on
+    `qty` (spec §4 review finding 4/m4): the fill is still emitted --
+    P_auto's `qty` is kept, since P_other running at all already means the
+    order is confirmed to fill on both plausible intrabar paths, only its
+    *size* (typically percent-of-equity sizing reacting to a different
+    intrabar PnL path) differs -- the flag lets a caller treat the qty
+    itself as less certain than the fill's existence."""
+    intent: str; leg: str; is_long: bool; qty: float; price: float; entry_bar: int; exit_bar: int
+    path_variant: bool = False; qty_disagreement: bool = False
 
     @property
     def sig(self) -> tuple:
-        """The identity tuple `evaluate()` diffs bar-over-bar to detect a retraction."""
-        return (self.intent, self.leg, self.is_long, self.qty)
+        """The identity tuple `evaluate()` diffs bar-over-bar to detect a
+        retraction, and P_auto/P_other results are intersected on (spec §4
+        review finding 4/m4): `(intent, leg, is_long)` -- "same order, same
+        leg", per spec, NOT qty (a tick-to-tick qty drift on a
+        percent-of-equity order must not read as a retract+re-fill pair;
+        see `qty_disagreement`)."""
+        return (self.intent, self.leg, self.is_long)
 
 
 @dataclass
@@ -42,18 +75,25 @@ class ProbeResult:
     """One `Probe.evaluate()` call's outcome: the fills P_auto confirmed
     (`fills`), fills seen but held back (`deferred`), fills a PRIOR
     evaluate() reported on this bar that this one no longer confirms
-    (`retracted`), the settled intents' resolved levels refreshed under the
-    trail policy (`levels`), whether the dual-entry guard suppressed an
-    entry (`guard_active`), how long the recompute took, and whether
+    (`retracted`), ENTRY-leg fills dropped by the `created_now` ruling
+    because their resolved intent was not resting in the pre-run settled
+    book (`dropped`), the settled intents' resolved levels refreshed under
+    the trail policy (`levels`), whether the dual-entry guard suppressed
+    an entry (`guard_active`), how long the recompute took, and whether
     `P_other` had to run at all (`p_other_ran`)."""
     bar_index: int; forming: T.NormalizedBar; fills: list[ProbeFill]; deferred: list[ProbeFill]; retracted: list[ProbeFill]
     levels: dict[str, tuple[float | None, float | None, float | None]]; guard_active: bool; recompute_ms: int; p_other_ran: bool
+    dropped: list[ProbeFill] = dataclasses.field(default_factory=list)
 
 
 def last_bar_fills(r: RunResult, n: int) -> list[ProbeFill]:
-    """The `ProbeFill`s for bar `n` of run `r`: entries whose
-    `entry_bar_index == n` and exits whose `exit_bar_index == n`.
-    `open_at_end` rows (report-only, spec §0) are excluded."""
+    """The `ProbeFill`s for bar `n` of run `r` explained by its CLOSED
+    trades: entries whose `entry_bar_index == n` and exits whose
+    `exit_bar_index == n`. `open_at_end` rows (report-only, spec §0) are
+    excluded. Does NOT cover a fill that opens or reverses into a still-open
+    position, or one that merely reduces one -- those never appear as a
+    closed trade at all; see `_delta_fill` for that half (spec §4 review
+    finding 1 / plan defect, mirroring `ledger.py`'s `SettleResult.entry_fills`)."""
     out = []
     for t in r.trades:
         if t.open_at_end:
@@ -65,6 +105,82 @@ def last_bar_fills(r: RunResult, n: int) -> list[ProbeFill]:
     return out
 
 
+def _resolve_intent(book: dict[str, Intent], is_long: bool) -> str:
+    """The settled book's resting ENTRY/MARKET/RAW_ORDER intent on the
+    `is_long` side, chosen deterministically as the lowest mirror `index`
+    among candidates; `"?"` if none rest on that side. Used by
+    `_delta_fill` to attribute a position-delta fill to the resting order
+    that must have caused it (spec §4 review finding 1)."""
+    candidates = [it for it in book.values() if it.kind in _ENTRYISH_KINDS and it.is_long == is_long]
+    return min(candidates, key=lambda it: it.index).key.order_id if candidates else "?"
+
+
+def _delta_fill(r: RunResult, prev_position_size: float, forming: T.NormalizedBar, book: dict[str, Intent], n: int) -> ProbeFill | None:
+    """The ONE `ProbeFill` needed to explain run `r`'s position delta
+    against the ledger's last settlement, on top of whatever
+    `last_bar_fills` already reports from `r`'s closed trades (spec §4
+    review finding 1, the ruled PLAN DEFECT: the engine's trade report
+    lists closed trades only, so an entry that opens or adds to a
+    still-open position -- or an exit that merely reduces one -- never
+    shows up as a closed trade at all). Mirrors `ledger.py`'s
+    `SettleResult.entry_fills` construction in `Ledger._result`
+    (`position_delta`/the `unexplained` residual), including its N1 fix:
+    ENTRY vs EXIT is decided by DIRECTION (does the unexplained delta move
+    toward `r`'s own final position?), not by comparing magnitudes -- a
+    magnitude compare misjudges a same-magnitude reversal (e.g. -1 -> +1)
+    as an EXIT, silently dropping the reversal's opening half (confirmed
+    against the sma fixture's bar-2001 reversal from the review).
+
+    Returns `None` when the delta is fully explained by closed trades.
+
+    `intent` is resolved from `book` -- the PRE-run settled book, i.e. the
+    book as of the ledger's last real settlement, before ANY probe run --
+    via `_resolve_intent`, restricted to kind ENTRY/MARKET/RAW_ORDER (never
+    EXIT: a closing/reducing intent is exposed to the venue mirror under
+    one of those three kinds too -- see `book.py`'s `_counts_as_entry`
+    docstring for the RAW_ORDER case -- and `"?"` is expected, not a bug,
+    for a margin-call/max-intraday-loss close, which the engine synthesises
+    with no order id at all)."""
+    delta = r.position_size - prev_position_size
+    sign = lambda t: t.qty if t.is_long else -t.qty
+    closed = [t for t in r.trades if not t.open_at_end]
+    explained = sum(sign(t) for t in closed if t.entry_bar_index == n) - sum(sign(t) for t in closed if t.exit_bar_index == n)
+    unexplained = delta - explained
+    if abs(unexplained) <= _EPS:
+        return None
+    pos = r.position_size
+    leg = "ENTRY" if pos != 0.0 and (unexplained > 0) == (pos > 0) else "EXIT"
+    is_long = (unexplained > 0) if leg == "ENTRY" else (prev_position_size > 0)
+    price = r.position_avg_price if leg == "ENTRY" else forming.c
+    intent = _resolve_intent(book, is_long)
+    return ProbeFill(intent, leg, is_long, abs(unexplained), price, n, -1)
+
+
+def _drop_unresting_entries(fills: list[ProbeFill], resting_ids: set[str]) -> tuple[list[ProbeFill], list[ProbeFill]]:
+    """The `created_now` ruling (spec §4 review, replacing the old dead
+    `created_bar == n` exclusion): drop, and report separately, any
+    ENTRY-leg fill whose `intent` id is not resting in the PRE-run settled
+    book (`"?"` included) -- an entry fill can only legitimately come from
+    an order that was already resting before this bar; one that was not is
+    either a stale/short-circuited read or (per the ruling's engine-facts
+    analysis) an order created on the forming bar itself, which
+    `set_probe_suppress_tail_logic` makes unreachable under the probe
+    (kept as defense in depth regardless). EXIT legs are exempt: the
+    engine synthesises some closes (margin call / max-intraday-loss) with
+    no order id at all, and a reversal's close carries the OPPOSING
+    entry's id -- neither is "not resting" in any meaningful sense this
+    check should reject.
+
+    Returns `(kept, dropped)`."""
+    kept, dropped = [], []
+    for f in fills:
+        if f.leg == "ENTRY" and f.intent not in resting_ids:
+            dropped.append(f)
+        else:
+            kept.append(f)
+    return kept, dropped
+
+
 class Probe:
     """The intrabar probe: recomputes a full backtest over the ledger's
     settled bars plus the currently-forming one, at each tick, to see
@@ -73,12 +189,28 @@ class Probe:
 
     def __init__(self, handle, spec, ledger, trail_refresh_policy: str = "bar_open_level"):
         self.h, self.spec, self.L, self.policy = handle, spec, ledger, trail_refresh_policy
-        self.prev_fills: dict[int, set[tuple]] = defaultdict(set)      # bar_index -> sigs seen by the previous evaluate
+        self.prev_fills: dict[int, dict[tuple, ProbeFill]] = defaultdict(dict)   # bar_index -> {sig: last-confirmed ProbeFill}
         self.retracted_history: dict[int, list[ProbeFill]] = defaultdict(list)
 
     def _run(self, bars, path_order: int) -> RunResult:
         return self.h.run_full(bars, self.spec.script_tf,
                                per_run=[("set_probe_suppress_tail_logic", (True,)), ("set_path_order", (path_order,))])
+
+    def _prune_histories(self, n: int) -> None:
+        """N7: `prev_fills`/`retracted_history` are bounded to the current
+        bar -- only `n` is ever read back, so entries for bars < n are
+        dropped as soon as a new bar starts being probed, instead of
+        growing without bound for the life of the process."""
+        for k in [k for k in self.prev_fills if k < n]:
+            del self.prev_fills[k]
+        for k in [k for k in self.retracted_history if k < n]:
+            del self.retracted_history[k]
+
+    def _journal(self, journal, forming: T.NormalizedBar, now_ms: int, outcome: str, ms: int) -> None:
+        if journal is not None:
+            journal.append_evaluation({"epoch_hash": self.spec.epoch_hash(), "trigger": "evaluate", "tick_seq_from": None, "tick_seq_to": None,
+                                       "forming_json": json.dumps(forming.ohlcv()), "outcome": outcome, "recompute_ms": ms,
+                                       "created_ms": now_ms})   # N8: the tick's own now_ms, not just the insert-time default
 
     def evaluate(self, forming: T.NormalizedBar, now_ms: int, journal=None) -> ProbeResult:
         """Recompute through `forming` (the bar currently building) and
@@ -92,48 +224,88 @@ class Probe:
         if self.L.last is None:
             raise RuntimeError("seed the ledger first")
         n = self.L.n; t0 = time.perf_counter()
-        bars = [b.ohlcv() for b in self.L.bars] + [forming.ohlcv()]
-        book: dict[str, Intent] = settled_book(self.h, self.L.last)          # settled book from the LAST settlement's strategy is stale after a probe run:
-        # settled_book reads the handle's live strategy, so capture it BEFORE the probe run (the ledger's run was the last run).
+        self._prune_histories(n)
+        # N10: pass the bar objects straight through -- run_full() accepts
+        # anything exposing .ohlcv() (Task 0 prelim) -- instead of rebuilding
+        # an OHLCV-tuple list from self.L.bars on every evaluate() call;
+        # self.L.bars is itself a fresh list only when the ledger settles
+        # (once per bar), not once per tick.
+        bars = self.L.bars + [forming]
+        # settled_book reads the handle's live strategy, so this MUST be
+        # captured before any probe run_full() below (the ledger's own run
+        # was the handle's last run up to this point).
+        book: dict[str, Intent] = settled_book(self.h, self.L.last)
+        resting_ids = {it.key.order_id for it in book.values()}
         guard = dual_entry_guard(book, self.L.last.position_size)
+
         p_auto = self._run(bars, PATH_ORDER_AUTO)
         if p_auto.status != 0:
-            if journal is not None:
-                journal.append_evaluation({"epoch_hash": self.spec.epoch_hash(), "trigger": "evaluate", "tick_seq_from": None, "tick_seq_to": None,
-                                           "forming_json": json.dumps(forming.ohlcv()), "outcome": "aborted", "recompute_ms": int((time.perf_counter() - t0) * 1000)})
-            return ProbeResult(n, forming, [], [], [], {}, guard, int((time.perf_counter() - t0) * 1000), False)
-        auto_fills = last_bar_fills(p_auto, n)
-        created_now = {it.key.order_id for it in book.values() if it.created_bar == n}
-        auto_fills = [f for f in auto_fills if f.intent not in created_now]
+            ms = int((time.perf_counter() - t0) * 1000)
+            self._journal(journal, forming, now_ms, "aborted", ms)
+            return ProbeResult(n, forming, [], [], [], {}, guard, ms, False, [])
+
+        # M2 fix: capture the intrabar_best refresh's book IMMEDIATELY after
+        # P_auto -- while the handle's last run is still P_auto's, not
+        # P_other's (which may run below) -- keyed the same way
+        # settled_book always keys (the mirror's own created cycle seq).
+        probe_book: dict[str, Intent] | None = None
+        if self.policy == "intrabar_best":
+            probe_book = settled_book(self.h, dataclasses.replace(self.L.last, pending_orders=p_auto.pending_orders, cycle_seq=p_auto.position_cycle_seq))
+
+        # M1 fix: join last_bar_fills' closed-trade fills with the
+        # position-delta fill (opens/adds/reversal-opens/partial-reduces
+        # that never appear as a closed trade), then apply the created_now
+        # ruling to both before anything downstream sees them.
+        d_auto = _delta_fill(p_auto, self.L.last.position_size, forming, book, n)
+        auto_all = last_bar_fills(p_auto, n) + ([d_auto] if d_auto is not None else [])
+        auto_fills, dropped = _drop_unresting_entries(auto_all, resting_ids)
+
         fills, deferred, other_ran = [], [], False
         if auto_fills:
             p_other = self._run(bars, path_order_other(forming)); other_ran = True
             if p_other.status != 0:
-                other_sigs = set()
-            else:
-                other_sigs = {f.sig for f in last_bar_fills(p_other, n)}
+                # M3 fix: a P_other abort is an ABORT, not "P_other disagrees
+                # with everything" -- journal it and return an empty result
+                # (as the P_auto abort path does above), never emit on a
+                # half-run, and never touch prev_fills/retracted_history.
+                ms = int((time.perf_counter() - t0) * 1000)
+                self._journal(journal, forming, now_ms, "aborted", ms)
+                return ProbeResult(n, forming, [], [], [], {}, guard, ms, True, [])
+            d_other = _delta_fill(p_other, self.L.last.position_size, forming, book, n)
+            other_all = last_bar_fills(p_other, n) + ([d_other] if d_other is not None else [])
+            other_kept, _ = _drop_unresting_entries(other_all, resting_ids)
+            other_by_sig = {f.sig: f for f in other_kept}
             for f in auto_fills:
-                if f.sig in other_sigs:
+                match = other_by_sig.get(f.sig)
+                if match is not None:
+                    # m4: intersect on (intent, leg, is_long); qty is data --
+                    # a disagreement is flagged, not treated as a mismatch.
+                    if abs(match.qty - f.qty) > _QTY_EPS:
+                        f = dataclasses.replace(f, qty_disagreement=True)
                     fills.append(f)
                 else:
                     # path-variant: emitted only when it closes the same cycle (EXIT), deferred when it changes net position
                     (fills if f.leg == "EXIT" else deferred).append(dataclasses.replace(f, path_variant=True))
         if guard:
             deferred += [f for f in fills if f.leg == "ENTRY"]; fills = [f for f in fills if f.leg != "ENTRY"]
-        sigs = {f.sig for f in fills}
-        retracted = [ProbeFill(*s[:2], s[2], s[3], math.nan, n, -1) for s in (self.prev_fills[n] - sigs)]
-        self.prev_fills[n] = sigs; self.retracted_history[n] += retracted
+
+        # N7 (cont'd): prev_fills now stores the full ProbeFill per sig (not
+        # a bare sig set) so a retraction can carry the original fill's
+        # price/bars forward instead of a synthesized NaN-priced stand-in.
+        cur_map = {f.sig: f for f in fills}
+        prev_map = self.prev_fills[n]
+        retracted = [prev_map[s] for s in (prev_map.keys() - cur_map.keys())]
+        self.prev_fills[n] = cur_map
+        self.retracted_history[n] += retracted
+
         # level refresh for settled intents (spec §4 evaluate 3)
         levels: dict[str, tuple] = {}
-        if self.policy == "intrabar_best":
-            probe_book = settled_book(self.h, dataclasses.replace(self.L.last, pending_orders=p_auto.pending_orders, cycle_seq=p_auto.position_cycle_seq))
+        if self.policy == "intrabar_best" and probe_book is not None:
             for k, it in book.items():
                 pit = probe_book.get(k); levels[k] = (pit.stop, pit.limit, pit.activation) if pit else (it.stop, it.limit, it.activation)
         else:
             for k, it in book.items():
                 levels[k] = (it.stop, it.limit, it.activation)
         ms = int((time.perf_counter() - t0) * 1000)
-        if journal is not None:
-            journal.append_evaluation({"epoch_hash": self.spec.epoch_hash(), "trigger": "evaluate", "tick_seq_from": None, "tick_seq_to": None,
-                                       "forming_json": json.dumps(forming.ohlcv()), "outcome": "ran", "recompute_ms": ms})
-        return ProbeResult(n, forming, fills, deferred, retracted, levels, guard, ms, other_ran)
+        self._journal(journal, forming, now_ms, "ran", ms)
+        return ProbeResult(n, forming, fills, deferred, retracted, levels, guard, ms, other_ran, dropped)
