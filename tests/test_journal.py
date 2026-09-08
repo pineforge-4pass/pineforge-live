@@ -370,6 +370,45 @@ def test_prepare_over_an_armed_marker_is_a_noop_and_idempotent(tmp_path):
     m.prepare()
     assert not m.exists() and os.path.getsize(m.path) == 4096
 
+def test_prepare_pads_a_zero_byte_armed_marker_back_up_to_size(tmp_path):
+    # R3: a crash between prepare()'s own O_CREAT|O_EXCL create and its
+    # zero-fill pwrite (or an externally created empty file) used to leave
+    # an armed marker under 4096 bytes forever -- every later prepare()
+    # no-op'd on it since payload is None either way (armed, not SET).
+    # Now it is topped up idempotently, never disarming anything.
+    m = StopMarker(tmp_path / "j.sqlite3.stop")
+    m.path.write_bytes(b"")  # simulated crash: 0 bytes, still armed
+    m.prepare()
+    assert os.path.getsize(m.path) == 4096
+    assert not m.exists()
+    m.prepare()  # idempotent: already full-size, true no-op
+    assert os.path.getsize(m.path) == 4096
+
+def test_prepare_pads_a_short_nonzero_armed_marker_back_up_to_size(tmp_path):
+    m = StopMarker(tmp_path / "j.sqlite3.stop")
+    m.path.write_bytes(b"\0" * 100)  # e.g. an externally created short file
+    m.prepare()
+    assert os.path.getsize(m.path) == 4096
+    assert not m.exists()
+
+def test_prepare_wraps_permission_error_as_journal_fault(tmp_path):
+    # R5: prepare()'s OS-level failures used to escape raw (unlike
+    # write(), which already normalizes to JournalFault). An unreadable
+    # existing marker (_payload()'s PermissionError) is now wrapped too.
+    m = StopMarker(tmp_path / "j.sqlite3.stop")
+    m.prepare()
+    os.chmod(m.path, 0o000)
+    try:
+        with pytest.raises(JournalFault):
+            m.prepare()
+    finally:
+        os.chmod(m.path, 0o600)  # restore so tmp_path cleanup can remove it
+
+def test_prepare_wraps_missing_parent_directory_as_journal_fault(tmp_path):
+    m = StopMarker(tmp_path / "missing_dir" / "j.sqlite3.stop")
+    with pytest.raises(JournalFault):
+        m.prepare()
+
 def test_write_without_prepare_still_produces_a_durable_marker(tmp_path):
     # N2: the emergency STOP path cannot depend on prepare() having been
     # called (no runtime caller is wired up yet) or having succeeded.
@@ -462,3 +501,57 @@ def test_refused_open_closes_its_connection_before_raising(tmp_path, monkeypatch
     # row and reopening still works.
     con = sqlite3.connect(p); con.execute("UPDATE settlements SET equity = equity - 1"); con.commit(); con.close()
     Journal.open(p, create=False).close()
+
+def test_open_closes_connection_on_baseexception_not_just_exception(tmp_path, monkeypatch):
+    # R6: Journal.open()'s cleanup used to catch only `Exception`, so a
+    # BaseException (KeyboardInterrupt/SystemExit landing mid-PRAGMA/DDL/
+    # verify_tail) still left `con` open. `except BaseException` closes it
+    # unconditionally.
+    p = tmp_path / "j.sqlite3"
+    Journal.open(p).close()  # existed=True on reopen, so verify_tail() runs
+
+    opened: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+    def spy_connect(*a, **kw):
+        c = real_connect(*a, **kw)
+        opened.append(c)
+        return c
+    monkeypatch.setattr(sqlite3, "connect", spy_connect)
+    monkeypatch.setattr(Journal, "verify_tail", lambda self: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt):
+        Journal.open(p, create=False)
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute("SELECT 1")  # closed despite a BaseException, not an Exception
+
+def test_open_writes_schema_meta_version_on_create_and_reopen_is_clean(tmp_path):
+    # R4: a fresh journal records SCHEMA_VERSION once; reopening it must
+    # not error or duplicate the row.
+    p = tmp_path / "j.sqlite3"
+    j = Journal.open(p)
+    assert j.rows("schema_meta", "1=1", ()) == [{"version": 1}]
+    j.close()
+    j2 = Journal.open(p, create=False)
+    assert j2.rows("schema_meta", "1=1", ()) == [{"version": 1}]
+    j2.close()
+
+def test_open_refuses_schema_meta_version_mismatch(tmp_path):
+    p = tmp_path / "j.sqlite3"
+    Journal.open(p).close()
+    con = sqlite3.connect(p); con.execute("UPDATE schema_meta SET version=2"); con.commit(); con.close()
+    with pytest.raises(JournalFault, match="schema_meta version"):
+        Journal.open(p, create=False)
+
+def test_open_refuses_a_pre_schema_versioning_journal(tmp_path):
+    # R4: a journal created before 57b9730 has no schema_meta row --
+    # simulated here by deleting it from an otherwise-normal journal,
+    # since a real pre-versioning file would likewise have the table
+    # freshly (re)created empty by `CREATE TABLE IF NOT EXISTS` on open,
+    # then found with zero rows. v1 journals are not migrated: refused
+    # with a clear message rather than silently backfilled to version 1.
+    p = tmp_path / "j.sqlite3"
+    Journal.open(p).close()
+    con = sqlite3.connect(p); con.execute("DELETE FROM schema_meta"); con.commit(); con.close()
+    with pytest.raises(JournalFault, match="not migrated"):
+        Journal.open(p, create=False)

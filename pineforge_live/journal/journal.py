@@ -3,7 +3,7 @@ import hashlib, json, os, sqlite3, sys, time
 from pathlib import Path
 from typing import Any, Callable
 from pineforge_live import types as T
-from .schema import DDL, CHECKSUMMED, CHECKSUM_EXCLUDE, HEX_HASH_COLUMNS
+from .schema import DDL, CHECKSUMMED, CHECKSUM_EXCLUDE, HEX_HASH_COLUMNS, SCHEMA_VERSION
 
 class JournalFault(RuntimeError): pass
 class JournalCorrupt(RuntimeError): pass
@@ -118,6 +118,25 @@ class Journal:
             if int(sync) != 2:
                 raise JournalFault(f"synchronous=FULL not honored for {path} (synchronous={sync!r})")
             con.executescript(DDL)
+            # R4: schema_meta(version) is the durable record of which shape
+            # this journal was created under. A fresh file writes its
+            # version row here, once. An EXISTING file with no such row
+            # predates schema versioning (before 57b9730) -- v1 journals
+            # are not migrated, so that shape is refused outright with a
+            # clear message rather than silently backfilled to version 1.
+            # A row present but not matching SCHEMA_VERSION is refused too.
+            meta_row = con.execute("SELECT version FROM schema_meta").fetchone()
+            if meta_row is None:
+                if existed:
+                    raise JournalFault(
+                        f"journal {path} has no schema_meta row (pre-schema-versioning journal; "
+                        "v1 journals are not migrated)"
+                    )
+                con.execute("INSERT INTO schema_meta(version) VALUES(?)", (SCHEMA_VERSION,))
+            elif int(meta_row[0]) != SCHEMA_VERSION:
+                raise JournalFault(
+                    f"journal {path} schema_meta version {meta_row[0]} does not match expected {SCHEMA_VERSION}"
+                )
             journal = cls(con, path)
             if existed:
                 # A journal that already existed on disk -- whether opened
@@ -131,10 +150,12 @@ class Journal:
             if con is not None:
                 con.close()
             raise JournalFault(str(e)) from e
-        except Exception:
-            # JournalFault (bad PRAGMA) and JournalCorrupt/StopMarkerPresent
-            # (verify_tail) are not sqlite3.Error -- catch everything else
-            # here so no exception path leaves `con` open.
+        except BaseException:
+            # JournalFault (bad PRAGMA, schema_meta mismatch) and
+            # JournalCorrupt/StopMarkerPresent (verify_tail) are not
+            # sqlite3.Error -- and R6: a KeyboardInterrupt/SystemExit
+            # landing mid-PRAGMA/DDL/verify_tail is not even an Exception.
+            # Catch everything here so no exception path leaves `con` open.
             if con is not None:
                 con.close()
             raise

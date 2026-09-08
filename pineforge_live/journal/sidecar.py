@@ -29,34 +29,61 @@ class StopMarker:
         - Absent: create with O_CREAT|O_EXCL|O_SYNC, zero-fill 4096 bytes,
           fsync file + dir.
         - Exists and armed (payload parses to None -- all-zero or empty):
-          no-op, file untouched. Idempotent: calling prepare() twice on an
-          already-armed marker does nothing the second time.
+          no-op if already SIZE bytes. Idempotent: calling prepare() twice
+          on an already-armed marker does nothing the second time.
+        - Exists and armed but SHORT (R3: e.g. a crash between this
+          method's own O_EXCL create and its zero-fill pwrite, or an
+          externally created empty/short file) -- padded with zeros up to
+          SIZE in place (open, pwrite the missing tail, fsync file + dir).
+          Never disarms anything: payload is None by construction on this
+          path, so a SET or UNREADABLE marker never reaches here.
         - Exists and SET (parses with `level`) or UNREADABLE (non-zero,
           non-parsable payload): raise StopMarkerPresent and touch nothing.
+
+        R5: any OSError from opening/reading/writing/syncing the marker
+        (a directory at `self.path`, a permission error, ENOSPC, ...) is
+        normalized to JournalFault here too, matching write()'s contract --
+        StopMarkerPresent (not an OSError) still passes through untouched.
         """
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_SYNC", 0)
         try:
-            fd = os.open(self.path, flags, 0o600)
-        except FileExistsError:
-            payload = self._payload()
-            if payload is not None:
-                # SET (parses with `level`) or UNREADABLE (torn/garbage):
-                # never disarm -- leave the file exactly as it is.
-                raise StopMarkerPresent(
-                    f"STOP marker already present at {self.path}: {payload}; operator must clear it"
-                ) from None
-            # Armed-only (all-zero, or an empty/short file): already the
-            # no-op state prepare() is meant to produce -- nothing to do.
-            return
-        try:
-            buf = b"\0" * SIZE
-            n = os.pwrite(fd, buf, 0)
-            if n != len(buf):
-                raise JournalFault(f"short preallocate write for STOP marker {self.path}: {n}/{len(buf)} bytes")
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        self._fsync_dir()
+            try:
+                fd = os.open(self.path, flags, 0o600)
+            except FileExistsError:
+                payload = self._payload()
+                if payload is not None:
+                    # SET (parses with `level`) or UNREADABLE (torn/garbage):
+                    # never disarm -- leave the file exactly as it is.
+                    raise StopMarkerPresent(
+                        f"STOP marker already present at {self.path}: {payload}; operator must clear it"
+                    ) from None
+                # Armed-only (all-zero, or an empty/short file). R3: top up
+                # a short file to the full preallocated SIZE -- idempotent
+                # (a no-op once it is already SIZE bytes).
+                size = self.path.stat().st_size
+                if size < SIZE:
+                    pad_fd = os.open(self.path, os.O_WRONLY | getattr(os, "O_SYNC", 0))
+                    try:
+                        buf = b"\0" * (SIZE - size)
+                        n = os.pwrite(pad_fd, buf, size)
+                        if n != len(buf):
+                            raise JournalFault(f"short preallocate pad for STOP marker {self.path}: {n}/{len(buf)} bytes")
+                        os.fsync(pad_fd)
+                    finally:
+                        os.close(pad_fd)
+                    self._fsync_dir()
+                return
+            try:
+                buf = b"\0" * SIZE
+                n = os.pwrite(fd, buf, 0)
+                if n != len(buf):
+                    raise JournalFault(f"short preallocate write for STOP marker {self.path}: {n}/{len(buf)} bytes")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            self._fsync_dir()
+        except OSError as e:
+            raise JournalFault(f"STOP marker preallocate failed for {self.path}: {e}") from e
 
     def _fsync_dir(self) -> None:
         dfd = os.open(self.path.parent, os.O_RDONLY)

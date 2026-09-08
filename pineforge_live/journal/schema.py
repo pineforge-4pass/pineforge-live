@@ -14,6 +14,11 @@ Column notes:
   stale. "Is this action still pending?" is answered from the latest
   `order_states` row per `client_id` instead (`order_states.terminal`,
   written by `Journal.update_order_state`).
+- `schema_meta` (R4) holds exactly one row recording SCHEMA_VERSION at
+  create time. v1 journals are not migrated: a journal that already
+  existed on disk but has no `schema_meta` row (i.e. predates this table,
+  before 57b9730) is refused by `Journal.open` with a clear message
+  rather than silently backfilled.
 """
 DDL = """
 CREATE TABLE IF NOT EXISTS epochs(epoch_hash TEXT PRIMARY KEY, spec_json TEXT NOT NULL, created_ms INTEGER NOT NULL);
@@ -44,8 +49,13 @@ CREATE TABLE IF NOT EXISTS stops(id INTEGER PRIMARY KEY AUTOINCREMENT, level TEX
   cleared_ms INTEGER, cleared_cause TEXT, created_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS checks(fencing_token INTEGER PRIMARY KEY, lease_expiry_ms INTEGER NOT NULL, row_json TEXT, created_ms INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS ticks(seq INTEGER PRIMARY KEY, ts INTEGER NOT NULL, price REAL NOT NULL, qty REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS schema_meta(version INTEGER NOT NULL);
 """
 CHECKSUMMED = ("settlements", "actions", "evaluations", "bars")
+
+# R4: the schema_meta row Journal.open() writes on a fresh create and
+# checks on every reopen; bump this only alongside a real DDL migration.
+SCHEMA_VERSION = 1
 
 # Columns excluded from a table's checksum domain even though they are part
 # of the stored row (finding 2/4): `evaluations.id` is AUTOINCREMENT and not
