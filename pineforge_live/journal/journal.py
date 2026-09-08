@@ -270,7 +270,8 @@ class Journal:
         cols = list(row); placeholders = ",".join("?" for _ in cols)
         try:
             cur = self._exec(f"INSERT INTO {scratch}({','.join(cols)}) VALUES({placeholders}) RETURNING *", tuple(row.values()))
-            return dict(cur.fetchone())
+            cur.fetchone()  # Finish RETURNING before reading stored affinities.
+            return dict(self._exec(f"SELECT * FROM {scratch} WHERE rowid=?", (cur.lastrowid,)).fetchone())
         finally:
             self._exec(f"DELETE FROM {scratch}")
 
@@ -278,8 +279,8 @@ class Journal:
         """Insert into a CHECKSUMMED table with the checksum computed over
         the STORED row, not the caller's Python values (finding 2/4):
         insert a placeholder checksum, read the row back via
-        `INSERT ... RETURNING *` (so REAL/INTEGER affinity coercion has
-        already happened), compute the real checksum from that, then
+        a SELECT after `INSERT ... RETURNING *` (RETURNING exposes pre-read
+        numeric types on older SQLite releases), compute the checksum, then
         `UPDATE ... SET checksum=?` -- all inside one explicit transaction,
         so a crash between the two statements leaves nothing committed.
 
@@ -304,7 +305,10 @@ class Journal:
             inserted = cur.fetchone()
             if inserted is None:
                 return self._resolve_conflict(table, row, conflict_cols)
-            stored = dict(inserted)
+            # SQLite 3.37/3.40 RETURNING can expose an integral REAL as
+            # int (e.g. equity 10000), while SELECT returns 10000.0. Hash
+            # the actual stored row; otherwise restart sees a false tear.
+            stored = dict(self._exec(f"SELECT * FROM {table} WHERE rowid=?", (cur.lastrowid,)).fetchone())
             chk = checksum(_domain(table, stored))
             self._exec(f"UPDATE {table} SET checksum=? WHERE rowid=?", (chk, cur.lastrowid))
             stored["checksum"] = chk

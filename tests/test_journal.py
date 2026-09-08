@@ -761,3 +761,25 @@ def test_settlement_requires_trades_sha256(tmp_path):
     j.append_settlement({**row, "trades_sha256": "0" * 64})
     assert j.last_settlement("e1")["trades_sha256"] == "0" * 64
     j.close()
+
+
+@pytest.mark.parametrize('position,equity',[(0.0,10000.0),(-0.0,10000.0),(31.0,99800.5)])
+def test_checksum_reads_stored_affinity_after_older_sqlite_returning(tmp_path,monkeypatch,position,equity):
+    j=Journal.open(tmp_path/'old-returning.sqlite3')
+    original=j._exec
+    class ReturningCursor:
+        def __init__(self,cur):self.cur=cur;self.lastrowid=cur.lastrowid
+        def fetchone(self):
+            raw=self.cur.fetchone()
+            if raw is None:return None
+            # SQLite3.37/3.40 exposes exact integral REAL columns as int in
+            # RETURNING, though subsequent SELECT observes REAL affinity.
+            return {k:int(v) if isinstance(v,float) and v.is_integer() else v for k,v in dict(raw).items()}
+    def execute(sql,params=()):
+        cursor=original(sql,params)
+        return ReturningCursor(cursor) if 'RETURNING *' in sql else cursor
+    monkeypatch.setattr(j,'_exec',execute)
+    j.append_settlement(settlement(1,position=position,equity=equity))
+    j.append_settlement(settlement(1,position=position,equity=equity))
+    j.verify_tail();j.close()
+    reopened=Journal.open(tmp_path/'old-returning.sqlite3');reopened.verify_tail();reopened.close()
