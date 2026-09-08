@@ -171,3 +171,32 @@ def test_max_eval_rate_is_explicit_positive_and_part_of_runtime_identity(tmp_pat
         d['max_eval_rate'] = invalid
         with pytest.raises(ConfigError, match='max_eval_rate'):
             load_signal_config(write_config(tmp_path, d))
+
+
+@pytest.mark.parametrize('suffix',['.report.json','.stop','.lock','.lock.flock','.tmp','-wal','-shm'])
+def test_runtime_sidecars_cannot_overwrite_configuration(tmp_path,suffix):
+    d=config_document(tmp_path)
+    d['journal_path']='signals.sqlite3'
+    name='signals.report.json' if suffix=='.report.json' else 'signals.sqlite3'+suffix
+    path=tmp_path/name;path.write_text(json.dumps(d))
+    with pytest.raises(ConfigError,match='overlap'):
+        load_signal_config(path)
+    assert json.loads(path.read_text())==d
+
+
+def test_runtime_report_cannot_overwrite_jsonl_source(tmp_path):
+    d=config_document(tmp_path)
+    d['journal_path']='signals.sqlite3'
+    source=tmp_path/'signals.report.json';source.write_text('')
+    d['source']={'kind':'jsonl','path':source.name}
+    with pytest.raises(ConfigError,match='overlap'):
+        load_signal_config(write_config(tmp_path,d))
+
+
+def test_report_symlink_cannot_alias_configuration(tmp_path):
+    d=config_document(tmp_path);d['journal_path']='signals.sqlite3'
+    path=write_config(tmp_path,d)
+    (tmp_path/'signals.report.json').symlink_to(path)
+    with pytest.raises(ConfigError,match='overlap'):
+        load_signal_config(path)
+    assert json.loads(path.read_text())==d

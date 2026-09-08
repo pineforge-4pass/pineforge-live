@@ -228,8 +228,12 @@ def load_signal_config(path: str | Path) -> SignalConfig:
         history = tuple(load_history(history_path, d['script_tf']))
     except SourceError as exc:
         raise ConfigError(str(exc)) from None
-    if source.path == journal_path:
-        raise ConfigError('journal_path: must differ from source.path')
+    runtime_paths={journal_path,journal_path.with_suffix('.report.json'),
+                   Path(str(journal_path)+'.stop'),Path(str(journal_path)+'.lock'),
+                   Path(str(journal_path)+'.lock.flock'),Path(str(journal_path)+'.tmp'),
+                   Path(str(journal_path)+'-wal'),Path(str(journal_path)+'-shm')}
+    if {p.resolve() for p in runtime_paths} & (protected_paths | {source.path}):
+        raise ConfigError('journal_path: runtime state/report paths must not overlap configuration or input files')
     if horizon <= len(history):
         raise ConfigError('horizon_bars: must exceed seeded history length')
     try:
