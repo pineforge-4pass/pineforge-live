@@ -67,6 +67,13 @@ are required; the corpus feed is an LFS object. The build script requires
 `PINEFORGE_ENGINE_ROOT` explicitly and compiles the public corpus, which can
 take several minutes. Keep the corpus revision pinned by the engine.
 
+For your own PineScript source, use
+[pineforge-codegen-oss](https://github.com/pineforge-4pass/pineforge-codegen-oss)
+to generate C++, then compile it against the ABI-v4 engine. The compiler is
+a separate project with its own license (PolyForm Noncommercial plus its
+published supplemental terms, including personal trading); this repository's
+Apache-2.0 license does not change those compiler terms.
+
 ## Run a complete local example
 
 In one terminal, set a shared secret and start the example receiver:

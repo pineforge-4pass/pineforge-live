@@ -169,3 +169,27 @@ def test_real_websocket_feed_runs_cpp_and_delivers_webhooks(test_so,test_feed,tm
     assert report['error'] is None,report
     assert report['source_events']==12 and report['delivered']==2
     assert len(received)==2
+
+
+def test_expired_signal_worker_cannot_write_a_successors_stop():
+    from types import SimpleNamespace
+    from pineforge_live.signals.runtime import SignalWorker
+    calls=[]
+    worker=SignalWorker(SimpleNamespace())
+    worker.engine=SimpleNamespace(authority=lambda:False,stop=SimpleNamespace(raise_stop=lambda *args:calls.append(args)))
+    try:asyncio.run(worker.halt('expired owner'))
+    finally:worker.pool.shutdown(wait=True)
+    assert calls==[]
+
+
+def test_volume_only_updates_evaluate_after_rate_interval(test_so,test_feed,tmp_path,receiver):
+    from pineforge_live import types as T
+    port,_=receiver;path,bars=document(test_so,test_feed,tmp_path,port,trigger_mode='intrabar')
+    config=load_signal_config(path);b=bars[2000]
+    class Ticks:
+        async def events(self,from_seq=None):
+            yield T.Tick(T.NormalizedTick(b.ts_open,1,b.o,1))
+            yield T.Tick(T.NormalizedTick(b.ts_open+1000,2,b.o,2))
+    report=asyncio.run(run_signals(config,source=Ticks(),mode='stream'))
+    assert report['error'] is None,report
+    assert report['evaluations']==2 and report['coalesced']==0

@@ -147,3 +147,10 @@ def test_lost_authority_between_recompute_and_commit_sends_nothing(test_so,test_
     assert engine.j.last_settlement(engine.epoch)['bar_index']==2000
     assert not engine.marker.exists() # expired owner must not mutate a new owner's STOP
     engine.h.close();engine.j.close()
+
+
+@pytest.mark.parametrize('price',[0.0,-10.0])
+def test_neutral_signal_forwards_finite_nonpositive_engine_reference_price(price):
+    from types import SimpleNamespace
+    fill=SimpleNamespace(qty=1.,price=price,intent='L',leg='ENTRY',is_long=True)
+    assert SignalEngine._order(None,fill)['price']==price

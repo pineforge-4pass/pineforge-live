@@ -96,8 +96,10 @@ class SignalWorker:
     def abort_probe(self):
         if self.busy_evaluate and self.engine is not None:self.engine.h.request_abort()
     async def halt(self,cause):
-        if self.engine:
-            await self._call(self.engine.stop.raise_stop,T.StopLevel.FLAT_ONLY,T.StopDisposition.NONE,cause)
+        def owned_stop():
+            if self.engine and (self.engine.authority is None or self.engine.authority()):
+                self.engine.stop.raise_stop(T.StopLevel.FLAT_ONLY,T.StopDisposition.NONE,cause)
+        await self._call(owned_stop)
     async def close(self):
         def close():
             if self.engine:
@@ -291,7 +293,7 @@ async def _run_signals(config, *, mode=None, source=None, transport=None, clock=
                 continue
             else:raise SourceError('unsupported source event')
             if forming.ts_open!=last_bar.ts_open+width:raise SourceError('input does not continue confirmed history')
-            hlc=(forming.h,forming.l,forming.c)
+            hlc=(forming.o,forming.h,forming.l,forming.c,forming.v,forming.trade_count)
             if forming.ts_open not in confirmation_pending and (last_eval is None or (hlc!=previous_hlc and ts-last_eval>=min_eval_ms)):
                 result=await worker.evaluate(forming,ts,last_seq,from_ticks=builder_from_ticks,last_tick=last_tick)
                 if result.completed:

@@ -208,7 +208,7 @@ CREATE TABLE IF NOT EXISTS signal_checkpoints(
         return _canonical([fill.bar_index, fill.intent, fill.leg, fill.is_long, ordinal])
 
     def _order(self, fill, *, path_variant=False):
-        if not math.isfinite(fill.qty) or fill.qty <= 0 or not math.isfinite(fill.price) or fill.price <= 0:
+        if not math.isfinite(fill.qty) or fill.qty <= 0 or not math.isfinite(fill.price):
             raise ValueError('engine returned invalid signal quantity or price')
         cause = getattr(fill,'close_cause',0)
         return {'id':None if fill.intent in ('?', '') else fill.intent,
