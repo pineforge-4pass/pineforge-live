@@ -62,6 +62,15 @@ class EngineSyminfo:
                 "those are delivered via the dedicated pricescale/minmove fields "
                 "(EpochSpec.setter_sequence() emits them itself)"
             )
+        # NF3: pricescale/minmove are genuinely integral engine fields (the
+        # int() coercion below would otherwise silently truncate 100.5 to
+        # 100 and hash a different syminfo than the caller thought they
+        # passed) -- reject a non-integral value here, before coercion,
+        # rather than let it drift.
+        for name in ("pricescale", "minmove"):
+            v = getattr(self, name)
+            if float(v) != int(v):
+                raise ValueError(f"{name} must be integral, got {v!r}")
         # Final 3: mintick/pointvalue/numeric_metadata values are coerced to
         # float and pricescale/minmove to int so mintick=1 and mintick=1.0
         # (which configure the engine identically -- strategy_set_syminfo_mintick

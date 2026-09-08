@@ -11,7 +11,8 @@ from pineforge_live import types as T
 
 def settlement(i, epoch="e1", **overrides):
     row = {"bar_index": i, "epoch_hash": epoch, "runtime_config_hash": "rc", "bars_hash": 123 + i,
-           "broker_state_hash": 456 + i, "trades_len": i, "position": 0.0, "equity": 1000.0 + i}
+           "broker_state_hash": 456 + i, "trades_len": i, "position": 0.0, "equity": 1000.0 + i,
+           "trades_sha256": "0" * 64}
     row.update(overrides)
     return row
 
@@ -635,6 +636,32 @@ def test_open_refuses_a_file_with_no_schema_meta_table_without_mutating_it(tmp_p
     assert before == after
 
 
+def test_open_refuses_a_pre_versioning_delete_mode_file_without_mutating_it(tmp_path):
+    # NF5: `PRAGMA journal_mode=WAL` rewrites the database file header (and
+    # creates -wal/-shm siblings) even on a file about to be refused -- the
+    # R10 test above builds its fixture already in WAL mode, which cannot
+    # catch that. A genuinely pre-schema-versioning file sitting in
+    # SQLite's default DELETE journal mode (as any such file predating WAL
+    # adoption in this codebase would) must come back byte-for-byte
+    # unchanged, so the schema_meta-table check has to run BEFORE that
+    # PRAGMA, not after.
+    p = tmp_path / "j.sqlite3"
+    ddl_without_schema_meta = "\n".join(
+        line for line in DDL.strip().splitlines() if "schema_meta" not in line
+    )
+    con = sqlite3.connect(p, isolation_level=None)
+    mode = con.execute("PRAGMA journal_mode").fetchone()[0]
+    assert str(mode).lower() == "delete"  # sqlite's default -- the pre-WAL-adoption shape
+    con.executescript(ddl_without_schema_meta)
+    con.close()
+    before = hashlib.sha256(p.read_bytes()).hexdigest()
+    with pytest.raises(JournalFault, match="no schema_meta table"):
+        Journal.open(p, create=False)
+    after = hashlib.sha256(p.read_bytes()).hexdigest()
+    assert before == after
+    assert not (tmp_path / "j.sqlite3-wal").exists()
+
+
 def test_update_check_expiry_returns_rowcount(tmp_path):
     # rowcount: the implementer's own concern from task-4-rereview-3.md --
     # a silent no-op UPDATE would let renew() believe it extended a lease
@@ -722,4 +749,16 @@ def test_insert_checksummed_rolls_back_on_baseexception_not_just_exception(tmp_p
     # No leaked open transaction: a normal append right after succeeds.
     j.append_settlement(settlement(1))
     assert len(j.rows("settlements", "1=1", ())) == 1
+    j.close()
+
+
+def test_settlement_requires_trades_sha256(tmp_path):
+    from pineforge_live.journal import Journal, JournalFault
+    j = Journal.open(tmp_path / "j.sqlite3"); j.append_epoch("e1", "{}")
+    row = {"bar_index": 1, "epoch_hash": "e1", "runtime_config_hash": "rc", "bars_hash": 1, "broker_state_hash": 2,
+           "trades_len": 0, "position": 0.0, "equity": 1.0}
+    with pytest.raises(JournalFault):
+        j.append_settlement(row)
+    j.append_settlement({**row, "trades_sha256": "0" * 64})
+    assert j.last_settlement("e1")["trades_sha256"] == "0" * 64
     j.close()

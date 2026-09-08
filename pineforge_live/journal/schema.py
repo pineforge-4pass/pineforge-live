@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS bars(epoch_hash TEXT NOT NULL, ts_open INTEGER NOT NU
   checksum TEXT NOT NULL, PRIMARY KEY(epoch_hash, ts_open));
 CREATE TABLE IF NOT EXISTS settlements(epoch_hash TEXT NOT NULL, bar_index INTEGER NOT NULL, runtime_config_hash TEXT NOT NULL,
   bars_hash TEXT NOT NULL, broker_state_hash TEXT NOT NULL, trades_len INTEGER NOT NULL, position REAL NOT NULL,
-  equity REAL NOT NULL, created_ms INTEGER NOT NULL, checksum TEXT NOT NULL, PRIMARY KEY(epoch_hash, bar_index));
+  equity REAL NOT NULL, trades_sha256 TEXT NOT NULL, created_ms INTEGER NOT NULL, checksum TEXT NOT NULL, PRIMARY KEY(epoch_hash, bar_index));
 CREATE TABLE IF NOT EXISTS evaluations(id INTEGER PRIMARY KEY AUTOINCREMENT, epoch_hash TEXT NOT NULL, trigger TEXT NOT NULL,
   tick_seq_from INTEGER, tick_seq_to INTEGER, forming_json TEXT NOT NULL, outcome TEXT NOT NULL, recompute_ms INTEGER,
   created_ms INTEGER NOT NULL, checksum TEXT NOT NULL);
@@ -55,6 +55,9 @@ CHECKSUMMED = ("settlements", "actions", "evaluations", "bars")
 
 # R4: the schema_meta row Journal.open() writes on a fresh create and
 # checks on every reopen; bump this only alongside a real DDL migration.
+# Task 0 adds `settlements.trades_sha256`, but no journal built under
+# version 1 has ever been released, so there is nothing to migrate --
+# SCHEMA_VERSION stays at 1 rather than bumping for this column.
 SCHEMA_VERSION = 1
 
 # Columns excluded from a table's checksum domain even though they are part

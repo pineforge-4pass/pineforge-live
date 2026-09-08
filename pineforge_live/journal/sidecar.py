@@ -33,10 +33,10 @@ class StopMarker:
           on an already-armed marker does nothing the second time.
         - Exists and armed but SHORT (R3: e.g. a crash between this
           method's own O_EXCL create and its zero-fill pwrite, or an
-          externally created empty/short file) -- padded with zeros up to
-          SIZE in place (open, pwrite the missing tail, fsync file + dir).
-          Never disarms anything: payload is None by construction on this
-          path, so a SET or UNREADABLE marker never reaches here.
+          externally created empty/short file) -- appended with zeros up to
+          SIZE via O_APPEND (fsync file + dir). Never disarms anything:
+          payload is None by construction on this path, so a SET or
+          UNREADABLE marker never reaches here.
         - Exists and SET (parses with `level`) or UNREADABLE (non-zero,
           non-parsable payload): raise StopMarkerPresent and touch nothing.
 

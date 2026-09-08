@@ -86,3 +86,7 @@ def test_protocols_are_runtime_checkable():
         def timeout(self, ms): return ms
     assert isinstance(FakeClock(), B.Clock)
     assert B.ADAPTER_API_VERSION == 1
+
+def test_syminfo_rejects_non_integral_pricescale():
+    with pytest.raises(ValueError):
+        T.EngineSyminfo("t", "t", "p", "r", "crypto", "USDT", "ETH", 0.01, 100.5, 1.0, 1, "24x7", "UTC", "base", "d")

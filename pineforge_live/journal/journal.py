@@ -110,24 +110,21 @@ class Journal:
         con = None
         try:
             con = sqlite3.connect(path, isolation_level=None)
-            mode = con.execute("PRAGMA journal_mode=WAL").fetchone()[0]
-            if str(mode).lower() != "wal":
-                raise JournalFault(f"WAL mode not available for {path} (journal_mode={mode!r})")
-            con.execute("PRAGMA synchronous=FULL")
-            sync = con.execute("PRAGMA synchronous").fetchone()[0]
-            if int(sync) != 2:
-                raise JournalFault(f"synchronous=FULL not honored for {path} (synchronous={sync!r})")
-            # R10: on a file that already existed, check whether it even
-            # HAS a schema_meta table before running the DDL script --
-            # `executescript(DDL)`'s `CREATE TABLE IF NOT EXISTS schema_meta`
-            # would otherwise silently add the (empty) table to a genuinely
-            # pre-schema-versioning file moments before refusing to open it,
-            # so a refused file no longer comes back byte-for-byte
-            # unchanged, and once SCHEMA_VERSION bumps past 1 the same
-            # ordering would apply a future migration's DDL to a v0 file
-            # before refusing it. A file that already has the table (just
-            # missing its row, or holding a mismatched version) is judged
-            # below, after the DDL, exactly as before.
+            # R10: on a file that already existed, check whether it even HAS
+            # a schema_meta table BEFORE issuing any PRAGMA that mutates the
+            # file (NF5) -- `PRAGMA journal_mode=WAL` rewrites the database
+            # header and creates -wal/-shm siblings even on a file that is
+            # about to be refused, so a refused pre-schema-versioning file
+            # would no longer come back byte-for-byte unchanged. This plain
+            # `SELECT` against sqlite_master needs no journal mode change to
+            # run. `executescript(DDL)`'s `CREATE TABLE IF NOT EXISTS
+            # schema_meta` would similarly add the (empty) table to a
+            # genuinely pre-schema-versioning file moments before refusing
+            # it, and once SCHEMA_VERSION bumps past 1 the same ordering
+            # would apply a future migration's DDL to a v0 file before
+            # refusing it. A file that already has the table (just missing
+            # its row, or holding a mismatched version) is judged below,
+            # after the DDL, exactly as before.
             if existed:
                 has_schema_meta = con.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta'"
@@ -137,6 +134,13 @@ class Journal:
                         f"journal {path} has no schema_meta table (pre-schema-versioning journal; "
                         "v1 journals are not migrated)"
                     )
+            mode = con.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            if str(mode).lower() != "wal":
+                raise JournalFault(f"WAL mode not available for {path} (journal_mode={mode!r})")
+            con.execute("PRAGMA synchronous=FULL")
+            sync = con.execute("PRAGMA synchronous").fetchone()[0]
+            if int(sync) != 2:
+                raise JournalFault(f"synchronous=FULL not honored for {path} (synchronous={sync!r})")
             con.executescript(DDL)
             # R4: schema_meta(version) is the durable record of which shape
             # this journal was created under. A fresh file writes its
@@ -366,6 +370,16 @@ class Journal:
             conflict_cols=("epoch_hash", "ts_open"),
         )
     def append_settlement(self, row: dict[str, Any]) -> dict[str, Any]:
+        # Task 0: `trades_sha256` (a hex sha256 of the settlement's trades)
+        # joined the checksum domain -- required, not derived, since the
+        # journal never sees the trades list itself, only this digest of
+        # it. Validated eagerly as a well-formed 64-hex-digit string so a
+        # caller mistake fails loud as JournalFault at append time rather
+        # than as an opaque stored-checksum mismatch discovered later by
+        # verify_tail().
+        trades_sha256 = row.get("trades_sha256")
+        if not (isinstance(trades_sha256, str) and len(trades_sha256) == 64 and all(c in "0123456789abcdef" for c in trades_sha256)):
+            raise JournalFault(f"settlements.trades_sha256 must be a 64-hex-digit string, got {trades_sha256!r}")
         row = dict(row)
         for k in HEX_HASH_COLUMNS:
             if k in row and row[k] is not None:

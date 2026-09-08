@@ -23,7 +23,7 @@ This module now separates the two concerns:
     ever removed from `fence.py`.
 """
 from __future__ import annotations
-import subprocess, sys, textwrap, time
+import select, subprocess, sys, textwrap, time
 from pineforge_live.journal import Journal, FencedLease
 
 def test_child_process_acquire_sees_lease_held(tmp_path):
@@ -117,6 +117,14 @@ def test_child_process_blocks_on_flock_while_parent_holds_it(tmp_path):
             [sys.executable, "-c", child_code],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
+        # NF7: a blocking readline() here would hang the whole suite forever
+        # if the child never prints READY (e.g. it crashed on import before
+        # reaching the print) -- select.select() on the pipe with a 15s
+        # timeout fails with a clear message instead.
+        ready, _, _ = select.select([proc.stdout], [], [], 15)
+        if not ready:
+            proc.kill()
+            raise AssertionError(f"child did not print READY within 15s: {proc.stderr.read()}")
         ready_line = proc.stdout.readline()
         assert ready_line.strip() == "READY", (ready_line, proc.stderr.read())
         time.sleep(0.5)
