@@ -100,6 +100,11 @@ class FencedLease:
                 self.token = None
                 raise LeaseLost(f"lease token {held_token} lost (lock file now {cur})")
             self.expiry_ms = now_ms + lease_ms
+            # N4/R2: extend the journal's `checks` row too, not just the
+            # lock file -- otherwise acquire()'s checks-table guard only
+            # covers the initial lease_ms window and a lock file deleted
+            # after a renewal reopens the original N4 hole.
+            self.journal.update_check_expiry(held_token, self.expiry_ms)
             tmp = self.lock_path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"token": self.token, "expiry_ms": self.expiry_ms})); os.replace(tmp, self.lock_path)
 

@@ -386,6 +386,14 @@ class Journal:
         return cur.rowcount > 0
     def append_check(self, fencing_token: int, lease_expiry_ms: int, row: dict[str, Any] | None = None):
         self._insert("checks", {"fencing_token": fencing_token, "lease_expiry_ms": lease_expiry_ms, "row_json": json.dumps(row or {}, sort_keys=True)})
+    def update_check_expiry(self, fencing_token: int, lease_expiry_ms: int) -> None:
+        """N4/R2: renew() calls this (under the same `_flock()`) to extend
+        the SAME `checks` row `acquire()` wrote, so `live_check()`'s guard
+        keeps covering a renewing holder past its original acquire-time
+        `lease_ms` window -- not just the first lease period. `checks` is
+        not checksummed, so a plain UPDATE is safe here (finding 4/5 do not
+        apply)."""
+        self._exec("UPDATE checks SET lease_expiry_ms=? WHERE fencing_token=?", (lease_expiry_ms, fencing_token))
 
     # --- readers ----------------------------------------------------------------
     def last_settlement(self, epoch_hash: str) -> dict[str, Any] | None:

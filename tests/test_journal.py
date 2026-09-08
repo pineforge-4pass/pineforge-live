@@ -394,6 +394,34 @@ def test_acquire_consults_checks_table_when_lock_file_is_deleted(tmp_path):
         b.acquire(lease_ms=10_000, now_ms=1_000)  # a's lease is still live in `checks`
     j.close()
 
+def test_update_check_expiry_extends_the_stored_row(tmp_path):
+    j = Journal.open(tmp_path / "j.sqlite3")
+    j.append_check(1, 1_000)
+    j.update_check_expiry(1, 5_000)
+    row = j.rows("checks", "fencing_token=?", (1,))[0]
+    assert row["lease_expiry_ms"] == 5_000
+    j.close()
+
+def test_renew_extends_checks_lease_row_so_deleted_lock_stays_guarded(tmp_path):
+    # N4/R2: acquire()'s checks-table guard only covered the acquire-time
+    # expiry until renew() also extended it -- once a holder renews past
+    # its original lease_ms window, deleting the lock file reopened the
+    # original N4 hole (a second acquire could succeed while the first
+    # holder still believed itself live). renew() now extends the same
+    # `checks` row under the same `_flock()`.
+    j = Journal.open(tmp_path / "j.sqlite3")
+    lock = tmp_path / "j.lock"
+    a = FencedLease(lock, j)
+    t1 = a.acquire(lease_ms=1_000, now_ms=0)  # expiry 1_000, checks row (t1, 1_000)
+    a.renew(now_ms=900, lease_ms=1_000)       # expiry 1_900, checks row extended to (t1, 1_900)
+    lock.unlink()
+    b = FencedLease(lock, j)
+    with pytest.raises(LeaseHeld):
+        b.acquire(lease_ms=1_000, now_ms=1_500)  # a's renewed lease is still live in `checks`
+    t2 = b.acquire(lease_ms=1_000, now_ms=2_000)  # past 1_900 -- a's lease has truly lapsed
+    assert t2 == t1 + 1
+    j.close()
+
 def test_append_stop_cleared_records_cause_and_reports_when_nothing_open(tmp_path):
     # N5: `cause` used to be accepted and discarded, and a no-open-stop call
     # returned normally with no signal either way.
