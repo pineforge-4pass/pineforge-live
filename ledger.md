@@ -34,6 +34,27 @@ candidate Grok review follows.
 No push or public repository creation is performed; the earlier no-push
 instruction remains in force.
 
+## Public webhook review corrections
+
+Independent Grok review of `4fd8318e9f5553c0ed8c1f00a33b8cd3273531c4`
+returned CHANGES_REQUIRED (P0=0, P1=3, P2=2). All five findings were fixed:
+expired workers no longer write a successor's STOP; moving a relative config
+and journal preserves deployment/event identity; oversized WebSocket frames
+fail explicitly; docs specify contiguous tick sequences and reconnecting
+WebSocket lifetime. Tests cover actual receiver delivery after copying a
+journal and actual oversized WebSocket transport, not only mocks.
+
+Additional review fixes protect config/input files from report and sidecar
+path collisions (including symlinks), preserve finite neutral reference
+prices, and evaluate volume-only updates. Compiler licensing remains separate
+from this runtime's Apache-2.0 license.
+
+The revised suite passed 833 engine-backed tests and 683 tests with 150 skips
+without the engine; a further real oversized-WebSocket runtime regression
+also passed. Final exact-candidate totals, wheel digest, installed-package
+signed-HTTP readback and the final Grok verdict are saved in
+`build/webhook-review/verification.json`. No push is performed.
+
 ## Historical work before the webhook clarification
 
 ## Continuation of Claude session 08f941f2-ec0e-4df3-aada-eaef4778b971

@@ -216,3 +216,22 @@ def test_runtime_lost_commit_authority_does_not_fence_successor(test_so,test_fee
     monkeypatch.setattr(SignalEngine,'settle',original)
     successor=asyncio.run(run_signals(config,mode='check'))
     assert successor['error'] is None and successor['delivered']==2
+
+
+def test_real_oversized_websocket_frame_reports_error_and_stops(test_so,test_feed,tmp_path,receiver):
+    websockets=pytest.importorskip('websockets')
+    from pineforge_live.sources.base import MAX_FRAME_BYTES
+    port,received=receiver;path,_=document(test_so,test_feed,tmp_path,port)
+    async def scenario():
+        async def feed(socket):
+            await socket.send('x'*(MAX_FRAME_BYTES+1))
+            await socket.wait_closed()
+        async with websockets.serve(feed,'127.0.0.1',0) as server:
+            ws_port=server.sockets[0].getsockname()[1]
+            d=json.loads(path.read_text());d['source']={'kind':'websocket','url':f'ws://127.0.0.1:{ws_port}'}
+            path.write_text(json.dumps(d));config=load_signal_config(path)
+            report=await asyncio.wait_for(run_signals(config),10)
+            assert config.journal_path.with_name(config.journal_path.name+'.stop').exists()
+            return report
+    report=asyncio.run(scenario())
+    assert 'one MiB' in report['error'] and report['delivered']==0 and not received
