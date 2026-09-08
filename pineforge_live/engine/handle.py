@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Sequence
 from . import abi
 from .report import RunResult, collect, pending_order_layout
+from ..bars.policy import tf_ms
 
 PATH_ORDER_AUTO, PATH_ORDER_HIGH_FIRST, PATH_ORDER_LOW_FIRST = 0, 1, 2
 
@@ -148,6 +149,16 @@ class EngineHandle:
         self.lib.strategy_request_abort(self._s)
 
     def run_full(self, bars: Sequence, script_tf: str) -> RunResult:
+        # Validate BEFORE any engine call, and before a strategy is created:
+        # run_backtest_full hands script_tf straight to the engine's own
+        # timeframe parser, which does an uncaught C++ stoi cast on it -- a
+        # non-numeric (or empty/None) timeframe aborts the whole PROCESS, not
+        # just this call. Must be a non-empty string (tf_ms() itself assumes
+        # .strip() and would raise AttributeError, not ValueError, on None)
+        # accepted by tf_ms(); its ValueError propagates.
+        if not isinstance(script_tf, str) or not script_tf:
+            raise ValueError(f"bad timeframe {script_tf!r}")
+        tf_ms(script_tf)
         n = len(bars)
         arr = (abi.BarC * n)()
         for i, b in enumerate(bars):
@@ -156,6 +167,11 @@ class EngineHandle:
             else:
                 ts, o, h, l, c, v = b
                 arr[i].timestamp, arr[i].open, arr[i].high, arr[i].low, arr[i].close, arr[i].volume = ts, o, h, l, c, v
+        # Hoisted above _create_strategy(): if either of these raised AFTER a
+        # strategy was created, that strategy would leak (never freed) since
+        # neither call is inside the setter-replay try/except below.
+        rep = abi.ReportC()
+        tf = script_tf.encode()
         new_s = self._create_strategy()
         try:
             for name, args in self.setter_log:
@@ -163,8 +179,6 @@ class EngineHandle:
         except Exception:
             self.lib.strategy_free(new_s)
             raise
-        rep = abi.ReportC()
-        tf = script_tf.encode()
         # Publish BEFORE calling into the engine: request_abort() (called from
         # another thread while this run is in flight) reads self._s, so the
         # swap must land before run_backtest_full so an abort reaches the

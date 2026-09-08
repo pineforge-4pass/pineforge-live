@@ -1,5 +1,6 @@
 import csv, threading
 from pathlib import Path
+import pytest
 from pineforge_live.engine import abi
 from pineforge_live.engine.handle import EngineHandle
 
@@ -87,13 +88,13 @@ def test_abort_returns_not_completed(test_so, test_feed):
     # BarC array first takes ~110ms, so a timer armed before run_full() would
     # fire (and be discarded by the engine, which is idle) long before the run
     # starts. Arm it instead at run entry by wrapping the bound C function, so
-    # the 1ms delay lands inside the ~29ms run and the abort is observable.
+    # the 3ms delay lands inside the ~29ms run and the abort is observable.
     bars = load_bars(test_feed)
     with EngineHandle(test_so) as h:
         original_run = h.lib.run_backtest_full
 
         def run_and_arm_abort(*args, **kwargs):
-            threading.Timer(0.001, h.request_abort).start()
+            threading.Timer(0.003, h.request_abort).start()
             return original_run(*args, **kwargs)
 
         h.lib.run_backtest_full = run_and_arm_abort
@@ -103,6 +104,38 @@ def test_abort_returns_not_completed(test_so, test_feed):
         assert r.trades == []  # NOT_COMPLETED: the report is discarded by the caller
         r2 = h.run_full(bars[:2000], "15")  # an idle abort never leaks into the next run
         assert r2.status == 0
+
+def test_run_full_rejects_bad_script_tf(test_so, test_feed):
+    """A bad script_tf must be rejected in Python BEFORE any engine call --
+    the engine aborts the whole process on a non-numeric timeframe (uncaught
+    C++ stoi), and a strategy must not leak on the way to raising."""
+    bars = load_bars(test_feed, 100)
+    with EngineHandle(test_so) as h:
+        create_calls, free_calls = [], []
+        original_create, original_free = h.lib.strategy_create, h.lib.strategy_free
+
+        def counted_create(*args, **kwargs):
+            s = original_create(*args, **kwargs)
+            create_calls.append(s)
+            return s
+
+        def counted_free(*args, **kwargs):
+            free_calls.append(args[0] if args else None)
+            return original_free(*args, **kwargs)
+
+        h.lib.strategy_create = counted_create
+        h.lib.strategy_free = counted_free
+        live_s = h._s
+        try:
+            for bad in ("", "abc", None):
+                with pytest.raises(ValueError):
+                    h.run_full(bars, bad)
+        finally:
+            h.lib.strategy_create = original_create
+            h.lib.strategy_free = original_free
+        assert create_calls == []  # no strategy was ever created for a bad script_tf
+        assert free_calls == []
+        assert h._s is live_s  # the handle's live strategy is unchanged
 
 def test_accessors_and_pending_book(test_so, test_feed):
     bars = load_bars(test_feed, 4000)

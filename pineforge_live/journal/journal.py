@@ -1,7 +1,7 @@
 from __future__ import annotations
-import hashlib, json, sqlite3, time
+import hashlib, json, os, sqlite3, time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from pineforge_live import types as T
 from .schema import DDL, CHECKSUMMED
 
@@ -44,6 +44,27 @@ class Journal:
 
     def close(self):
         self.con.close()
+
+    @staticmethod
+    def emergency_log(path: str | Path) -> Callable[[dict], None]:
+        """Spec §5.2: an EMERGENCY action attempts the sqlite write-ahead and,
+        on failure, still submits AND appends to an out-of-band log on a
+        different filesystem (or stderr) so the attempt is never silently
+        lost. The returned callable is independent of any Journal instance
+        (no `self`, never touches sqlite), so it is safe to call after the
+        Journal it stands in for has been closed. Each call appends exactly
+        one line -- canonical JSON of `row` + "\\n" -- via a single
+        O_SYNC'd write + fsync so the line lands durably or not at all."""
+        path = Path(path)
+        def _append(row: dict[str, Any]) -> None:
+            line = (json.dumps(row, sort_keys=True, separators=(",", ":"), default=str) + "\n").encode()
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_SYNC, 0o600)
+            try:
+                os.write(fd, line)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        return _append
 
     # --- helpers --------------------------------------------------------------
     def _exec(self, sql: str, params=()):

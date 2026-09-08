@@ -31,6 +31,22 @@ def test_write_ahead_action_and_non_terminal_query(tmp_path):
     assert j.actions_non_terminal() == []
     j.close()
 
+def test_emergency_log_appends_synced_lines(tmp_path):
+    p = tmp_path / "emergency.log"
+    j = Journal.open(tmp_path / "j.sqlite3")
+    log = j.emergency_log(p)
+    log({"kind": "EMERGENCY", "client_id": "c1", "reason": "sqlite write-ahead failed"})
+    log({"kind": "EMERGENCY", "client_id": "c2"})
+    lines = p.read_text().splitlines()
+    assert len(lines) == 2
+    rows = [json.loads(line) for line in lines]
+    assert rows[0]["client_id"] == "c1" and rows[1]["client_id"] == "c2"
+    # Never touches sqlite, never raises on a closed journal.
+    j.close()
+    log({"kind": "EMERGENCY", "client_id": "c3"})
+    lines = p.read_text().splitlines()
+    assert len(lines) == 3 and json.loads(lines[2])["client_id"] == "c3"
+
 def test_stop_marker_durability_and_refusal(tmp_path):
     m = StopMarker(tmp_path / "j.sqlite3.stop")
     assert not m.exists()
