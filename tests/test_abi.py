@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from pineforge_live.engine import abi
 from pineforge_live.engine.handle import EngineHandle
+from tests.helpers import load_bars as load_normalized_bars
 
 PKG = Path(__file__).resolve().parents[1] / "pineforge_live"
 
@@ -171,6 +172,21 @@ def test_accessors_and_pending_book(test_so, test_feed):
             assert rc == 0  # a live entry order fills (rc=0) at the close price (verified)
             assert h.level_resolved(po["index"]) == 1  # an entry order resolves to 1 (verified)
         assert h.effective_levels(999)[0] == -1 and h.probe_fill_qty(999, 1.0)[0] == -1
+
+def test_run_full_accepts_bar_objects_exposing_ohlcv(test_so, test_feed):
+    """Prelim (Task 0 review finding 1): run_full() accepts a bar object
+    exposing .ohlcv() (e.g. types.NormalizedBar) directly, not just an
+    already-unpacked 6-tuple -- and produces an identical run either way."""
+    tuples = load_bars(test_feed, 2000)
+    objects = load_normalized_bars(test_feed, 2000)
+    assert not isinstance(objects[0], tuple) and hasattr(objects[0], "ohlcv")
+    with EngineHandle(test_so) as h:
+        h.set_broker_state_hash_recording(True)
+        r1 = h.run_full(tuples, "15")
+    with EngineHandle(test_so) as h2:
+        h2.set_broker_state_hash_recording(True)
+        r2 = h2.run_full(objects, "15")
+    assert r1.trades == r2.trades and r1.broker_state_hash == r2.broker_state_hash
 
 def test_run_full_per_run_flags_do_not_grow_setter_log(test_so, test_feed):
     """Final 2: probe-only flags passed via `run_full(..., per_run=...)`

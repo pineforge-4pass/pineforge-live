@@ -753,7 +753,6 @@ def test_insert_checksummed_rolls_back_on_baseexception_not_just_exception(tmp_p
 
 
 def test_settlement_requires_trades_sha256(tmp_path):
-    from pineforge_live.journal import Journal, JournalFault
     j = Journal.open(tmp_path / "j.sqlite3"); j.append_epoch("e1", "{}")
     row = {"bar_index": 1, "epoch_hash": "e1", "runtime_config_hash": "rc", "bars_hash": 1, "broker_state_hash": 2,
            "trades_len": 0, "position": 0.0, "equity": 1.0}

@@ -184,6 +184,12 @@ class EngineHandle:
             if isinstance(b, abi.BarC):
                 arr[i] = b
             else:
+                # Prelim (Task 0 review finding 1): accept a bar object that
+                # exposes .ohlcv() (e.g. types.NormalizedBar) directly, not
+                # just an already-unpacked 6-tuple -- so callers such as
+                # core.ledger.Ledger don't need a comprehension to convert
+                # a bar list before every run_full() call.
+                b = b.ohlcv() if hasattr(b, "ohlcv") else b
                 ts, o, h, l, c, v = b
                 arr[i].timestamp, arr[i].open, arr[i].high, arr[i].low, arr[i].close, arr[i].volume = ts, o, h, l, c, v
         # Hoisted above _create_strategy(): if either of these raised AFTER a

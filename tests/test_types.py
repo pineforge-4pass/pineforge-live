@@ -4,7 +4,7 @@ from pineforge_live import types as T
 from pineforge_live.adapters import base as B
 
 def test_engine_syminfo_hash_is_canonical():
-    a = T.EngineSyminfo(ticker="ETHUSDT.P", tickerid="BINANCE:ETHUSDT.P", prefix="BINANCE", root="ETHUSDT", type="crypto",
+    a = T.EngineSyminfo(ticker="ETHUSDT.P", tickerid="TAPE:ETHUSDT.P", prefix="TAPE", root="ETHUSDT", type="crypto",
                         currency="USDT", basecurrency="ETH", mintick=0.01, pricescale=100, pointvalue=1.0, minmove=1,
                         session="24x7", timezone="UTC", volumetype="base", description="ETH perp",
                         numeric_metadata={"b": 2.0, "a": 1.0}, string_metadata={"y": "1", "x": "0"})
@@ -17,7 +17,7 @@ def test_engine_syminfo_coerces_numeric_types_so_hash_is_stable():
     # identically -- strategy_set_syminfo_mintick takes a C double either
     # way -- but used to hash differently, so a JSON-sourced syminfo and a
     # hand-built one could silently disagree.
-    kwargs = dict(ticker="ETHUSDT.P", tickerid="BINANCE:ETHUSDT.P", prefix="BINANCE", root="ETHUSDT", type="crypto",
+    kwargs = dict(ticker="ETHUSDT.P", tickerid="TAPE:ETHUSDT.P", prefix="TAPE", root="ETHUSDT", type="crypto",
                   currency="USDT", basecurrency="ETH", pointvalue=1.0, session="24x7", timezone="UTC",
                   volumetype="base", description="ETH perp")
     a = T.EngineSyminfo(mintick=1, pricescale=100, minmove=1, **kwargs)
@@ -41,7 +41,7 @@ def test_engine_syminfo_rejects_pricescale_or_minmove_in_numeric_metadata():
 
 def test_engine_syminfo_hash_unchanged_after_mutating_callers_dict():
     numeric = {"a": 1.0}
-    a = T.EngineSyminfo(ticker="ETHUSDT.P", tickerid="BINANCE:ETHUSDT.P", prefix="BINANCE", root="ETHUSDT", type="crypto",
+    a = T.EngineSyminfo(ticker="ETHUSDT.P", tickerid="TAPE:ETHUSDT.P", prefix="TAPE", root="ETHUSDT", type="crypto",
                         currency="USDT", basecurrency="ETH", mintick=0.01, pricescale=100, pointvalue=1.0, minmove=1,
                         session="24x7", timezone="UTC", volumetype="base", description="ETH perp",
                         numeric_metadata=numeric, string_metadata={})
@@ -90,3 +90,14 @@ def test_protocols_are_runtime_checkable():
 def test_syminfo_rejects_non_integral_pricescale():
     with pytest.raises(ValueError):
         T.EngineSyminfo("t", "t", "p", "r", "crypto", "USDT", "ETH", 0.01, 100.5, 1.0, 1, "24x7", "UTC", "base", "d")
+
+def test_syminfo_rejects_bool_for_numeric_fields():
+    # Task 0 review finding 5: bool is an int subclass, so pricescale=True
+    # would otherwise silently coerce to 1 and hash the same as the caller
+    # passing the int -- reject every numeric field explicitly.
+    kwargs = dict(ticker="t", tickerid="t", prefix="p", root="r", type="crypto", currency="USDT", basecurrency="ETH",
+                  mintick=0.01, pricescale=100, pointvalue=1.0, minmove=1, session="24x7", timezone="UTC",
+                  volumetype="base", description="d")
+    for name, bad in (("mintick", True), ("pricescale", True), ("pointvalue", False), ("minmove", False)):
+        with pytest.raises(ValueError):
+            T.EngineSyminfo(**{**kwargs, name: bad})

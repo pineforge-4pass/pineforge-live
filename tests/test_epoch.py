@@ -4,11 +4,11 @@ from pineforge_live import types as T
 from pineforge_live.epoch import CodeIdentity, RuntimeConfig, EpochSpec, apply_epoch
 
 def syminfo():
-    return T.EngineSyminfo("ETHUSDT.P", "BINANCE:ETHUSDT.P", "BINANCE", "ETHUSDT", "crypto", "USDT", "ETH", 0.01, 100, 1.0, 1,
+    return T.EngineSyminfo("ETHUSDT.P", "TAPE:ETHUSDT.P", "TAPE", "ETHUSDT", "crypto", "USDT", "ETH", 0.01, 100, 1.0, 1,
                            "24x7", "UTC", "base", "ETH perp")
 
 def spec(**kw):
-    base = dict(venue="BINANCE", instrument=T.InstrumentId("BINANCE", T.MarketType.PERP, "ETHUSDT"), script_tf="15",
+    base = dict(venue="TAPE", instrument=T.InstrumentId("TAPE", T.MarketType.PERP, "ETHUSDT"), script_tf="15",
                 history_start_ms=1_577_836_800_000, horizon_bars=500_000,
                 code_identity=CodeIdentity("e" * 64, "c" * 64, "s" * 64, {"compiler": "clang"}),
                 syminfo=syminfo(), reference_tape_sha256="t" * 64,

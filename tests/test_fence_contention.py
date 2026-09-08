@@ -124,6 +124,7 @@ def test_child_process_blocks_on_flock_while_parent_holds_it(tmp_path):
         ready, _, _ = select.select([proc.stdout], [], [], 15)
         if not ready:
             proc.kill()
+            proc.wait(timeout=5)  # reap immediately rather than leaving a zombie until GC
             raise AssertionError(f"child did not print READY within 15s: {proc.stderr.read()}")
         ready_line = proc.stdout.readline()
         assert ready_line.strip() == "READY", (ready_line, proc.stderr.read())

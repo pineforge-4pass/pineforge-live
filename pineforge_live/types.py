@@ -62,6 +62,15 @@ class EngineSyminfo:
                 "those are delivered via the dedicated pricescale/minmove fields "
                 "(EpochSpec.setter_sequence() emits them itself)"
             )
+        # Task 0 review finding 5: bool is an int subclass, so pricescale=True/
+        # minmove=False (or mintick=True/pointvalue=False) would otherwise
+        # silently coerce to 1/0 below and hash identically to the caller
+        # passing the int -- reject it before coercion, same rationale as
+        # NF3's non-integral check just below.
+        for name in ("mintick", "pricescale", "pointvalue", "minmove"):
+            v = getattr(self, name)
+            if isinstance(v, bool):
+                raise ValueError(f"{name} must not be bool, got {v!r}")
         # NF3: pricescale/minmove are genuinely integral engine fields (the
         # int() coercion below would otherwise silently truncate 100.5 to
         # 100 and hash a different syminfo than the caller thought they
