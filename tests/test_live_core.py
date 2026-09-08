@@ -59,8 +59,17 @@ def test_l1_full_cadence_with_perfect_venue(core):
         by_key: dict[tuple, ActionRequest] = {}
         for a in pending_actions:
             by_key[(a.intent, "EXIT" if a.reduce_only else "ENTRY", a.target_bar_index)] = a
-        venue = [VenueFill(a.intent, leg, a.side, a.qty, a.price_hint or bar.c, i, T.FillCause.OURS, f"cid{k}",
-                           a.kind == "TRIGGER") for k, ((_, leg, _), a) in enumerate(by_key.items())]
+        # n5: ONE venue model, the same one `scripts/l1_harness.py`'s
+        # `echo` implements -- a MARKET_AT_OPEN fills at the bar's OPEN
+        # (spec §4 settle 6: the open IS the price), a TRIGGER at the
+        # probe's own hint, anything else at the close. Pricing a
+        # MARKET_AT_OPEN at the close here was harmless only while
+        # ENTRY_SLIP was unreachable; with m1 measuring the slip per
+        # matched pair it would fabricate one out of the bar's range.
+        venue = [VenueFill(a.intent, leg, a.side, a.qty,
+                           bar.o if a.kind == "MARKET_AT_OPEN" else (a.price_hint if a.price_hint is not None else bar.c),
+                           i, T.FillCause.OURS, f"cid{k}", a.kind == "TRIGGER")
+                 for k, ((_, leg, _), a) in enumerate(by_key.items())]
         real = c.ledger.last.position_size + sum((v.qty if v.side is T.Side.BUY else -v.qty)
                                                  for v in venue if v.cause is T.FillCause.OURS)
         out = c.settle(bar, venue_fills=venue, in_flight=set(), mirrored=set(), real_position=real, now_ms=bar.ts_open + 900_000)

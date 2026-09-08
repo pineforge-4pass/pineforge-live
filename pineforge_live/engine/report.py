@@ -23,7 +23,7 @@ class RunResult:
     position_cycle_seq: int
     trail_best_price: float          # NaN when flat
     current_equity: float            # initial_capital + net profit (NOT strategy.equity)
-    last_bar_dual_entry_path: int    # -1 none / engine codes
+    last_bar_dual_entry_path: int    # core.book.DUAL_ENTRY_PATH_NAMES: 0 None / 1 LongFirst / 2 ShortFirst (-1 = NULL handle)
     pending_orders: list[dict[str, Any]] = field(default_factory=list)
 
 _CTYPE = {"uint32_t": ctypes.c_uint32, "int32_t": ctypes.c_int32, "int64_t": ctypes.c_int64,

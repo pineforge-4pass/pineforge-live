@@ -3,7 +3,8 @@ import dataclasses
 from types import SimpleNamespace
 import pytest
 from pineforge_live import types as T
-from pineforge_live.core.book import settled_book
+from pineforge_live.core.book import book_diff, settled_book
+from pineforge_live.core.classify import emulated_from_settle
 from pineforge_live.core.ledger import Ledger
 from pineforge_live.core.probe import Probe, path_order_other
 from pineforge_live.engine.handle import PATH_ORDER_HIGH_FIRST, PATH_ORDER_LOW_FIRST
@@ -42,15 +43,15 @@ def env(request, test_feed, tmp_path):
     return spec, h, j, bars, L
 
 
-def _resolve_entry_fill_intent(ef: dict, book) -> str:
-    """Test-local mirror of `probe._resolve_intent`, applied to one of
-    `SettleResult.entry_fills`' plain dicts (the ledger itself leaves
-    `intent` unresolved -- `None` -- since it has no book access; the probe
-    resolves it via the SAME rule against the pre-bar settled book, so this
-    lets the L1 pin compare probe fills and settled entry_fills like with
-    like)."""
-    candidates = [it for it in book.values() if it.kind in ("ENTRY", "MARKET", "RAW_ORDER") and it.is_long == ef["is_long"]]
-    return min(candidates, key=lambda it: it.index).key.order_id if candidates else "?"
+def _settled_fill_ids(s, book_before) -> set:
+    """The `(intent, leg)` pairs the SETTLEMENT itself books for its bar --
+    `classify.emulated_from_settle` over the settlement's own book diff,
+    i.e. the ledger side of the ONE attribution rule (m4). The probe
+    resolves its own delta fills by the same rule against the same
+    departure signal, so the L1 pin compares like with like instead of
+    re-deriving the ledger's ids with a test-local copy of a rule that can
+    drift from both."""
+    return {(e.intent, e.leg) for e in emulated_from_settle(s, book_diff(book_before, s.book), book_before)}
 
 
 def test_probe_fills_subset_of_settlement_over_50_bars(env, request):
@@ -90,8 +91,7 @@ def test_probe_fills_subset_of_settlement_over_50_bars(env, request):
         # raise (settled_book's restored strict contract, Task 6 prelim).
         book_before = L.last.book
         s = L.settle(bar, now_ms=bar.ts_open + 900_000)
-        settled = {(k.entry_id, "ENTRY") for k in s.new_opened} | {(k.exit_id, "EXIT") for k in s.new_closed}
-        settled |= {(_resolve_entry_fill_intent(ef, book_before), ef["leg"]) for ef in s.entry_fills}
+        settled = _settled_fill_ids(s, book_before)
         total_probe += len(probe_fills_this_bar); total_settle += len(settled)
         # a probe fill that the settlement did not book must have been retracted by a later evaluate
         for f in probe_fills_this_bar - settled:
@@ -332,3 +332,88 @@ def test_intrabar_best_levels_pin_at_bracket_bar_2044(test_so_bracket, test_feed
     assert stop == pytest.approx(169.1312, abs=1e-4)
     assert limit == pytest.approx(170.9484, abs=1e-4)
     assert activation is None
+
+
+def test_delta_fill_attributes_the_order_that_left_the_book_not_the_lowest_index(monkeypatch):
+    """m4 (ONE attribution rule): with two same-side priced entries resting
+    -- a breakout stop `L1` at mirror index 0 and a pullback limit `L2` at
+    index 1, the shape a Pine script produces routinely -- and only `L2`
+    filling, the probe must attribute the position delta to `L2`, the row
+    that LEFT the book on that side (`classify.delta_candidates` over the
+    probe run's own pending-order mirror), exactly as
+    `classify.emulated_from_settle` does at the settlement.
+
+    Pre-fix the probe took the LOWEST-INDEX resting candidate (`L1`), so
+    it TRIGGERed `L1` while the settlement emulated `L2`: MISSED `L2` +
+    CONFIRMED-with-note `L1`, `probe_not_settled` in the harness, and a
+    `skipped_position_mismatch` every such bar."""
+    from pineforge_live.core.book import Intent, content_hash
+    from pineforge_live.core.ids import IntentKey
+    n = 30
+
+    def it(oid, index):
+        key = IntentKey(oid, "ENTRY", "", 0)
+        return key.s, Intent(key, index, True, "ENTRY", "", 100.0, None, None, True, 0, 1.0, None, False, False,
+                             content_hash(100.0, None, None, True, 1.0))
+
+    book = dict([it("L1", 0), it("L2", 1)])
+    # The mirror after the run: L1 still resting, L2 gone (it filled).
+    resting_l1 = [{"id": "L1", "type": 1, "from_entry": "", "created_position_cycle_seq": 0, "index": 0}]
+
+    def run_result() -> RunResult:
+        return RunResult(status=0, trades=[], net_profit=0.0, script_bars_processed=n + 1, broker_state_hash=[],
+                         position_size=1.0, position_avg_price=100.0, position_cycle_seq=0,
+                         trail_best_price=float("nan"), current_equity=0.0, last_bar_dual_entry_path=-1,
+                         pending_orders=resting_l1)
+
+    fake_ledger = SimpleNamespace(last=SimpleNamespace(book=book, position_size=0.0), n=n, bars=[])
+    fake_spec = SimpleNamespace(epoch_hash=lambda: "epoch")
+    forming = T.NormalizedBar(0, 100.0, 105.0, 95.0, 100.0, 1.0, 1, is_forming=True)
+    P = Probe(handle=None, spec=fake_spec, ledger=fake_ledger, trail_refresh_policy="bar_open_level")
+    monkeypatch.setattr(P, "_run", lambda bars, path_order: run_result())
+
+    r = P.evaluate(forming, now_ms=0, journal=None)
+    assert [(f.intent, f.leg) for f in r.fills] == [("L2", "ENTRY")]
+    assert r.dropped == []
+
+
+def test_the_dual_entry_guard_reads_the_engines_own_path_report(monkeypatch):
+    """m9: `ProbeResult.guard_active` (and the ENTRY-leg deferral it
+    drives) comes from `RunResult.last_bar_dual_entry_path`, not from a
+    book re-derivation -- two opposite pure-stop entries merely RESTING no
+    longer suppress an intrabar entry, and the engine reporting a resolved
+    dual-entry path does suppress it whatever the book holds."""
+    from pineforge_live.core.book import Intent, content_hash
+    from pineforge_live.core.ids import IntentKey
+    n = 31
+
+    def it(oid, is_long, index):
+        key = IntentKey(oid, "ENTRY", "", 0)
+        return key.s, Intent(key, index, is_long, "ENTRY", "", 105.0 if is_long else 95.0, None, None, True, 0,
+                             1.0, None, False, False, content_hash(None, None, None, is_long, 1.0))
+
+    book = dict([it("L", True, 0), it("S", False, 1)])
+    resting = [{"id": "L", "type": 1, "from_entry": "", "created_position_cycle_seq": 0, "index": 0},
+               {"id": "S", "type": 1, "from_entry": "", "created_position_cycle_seq": 0, "index": 1}]
+
+    def run_result(path: int) -> RunResult:
+        # L filled (it leaves the mirror); S stays resting.
+        return RunResult(status=0, trades=[], net_profit=0.0, script_bars_processed=n + 1, broker_state_hash=[],
+                         position_size=1.0, position_avg_price=100.0, position_cycle_seq=0,
+                         trail_best_price=float("nan"), current_equity=0.0, last_bar_dual_entry_path=path,
+                         pending_orders=[resting[1]])
+
+    forming = T.NormalizedBar(0, 100.0, 105.0, 95.0, 100.0, 1.0, 1, is_forming=True)
+    fake_spec = SimpleNamespace(epoch_hash=lambda: "epoch")
+
+    def probe_for(path):
+        fake_ledger = SimpleNamespace(last=SimpleNamespace(book=book, position_size=0.0), n=n, bars=[])
+        P = Probe(handle=None, spec=fake_spec, ledger=fake_ledger, trail_refresh_policy="bar_open_level")
+        monkeypatch.setattr(P, "_run", lambda bars, path_order, _p=path: run_result(_p))
+        return P.evaluate(forming, now_ms=0, journal=None)
+
+    for none_code in (0, -1):   # 0 = the engine's own "None", -1 = its NULL-handle return
+        free = probe_for(none_code)
+        assert not free.guard_active and [(f.intent, f.leg) for f in free.fills] == [("L", "ENTRY")]
+    guarded = probe_for(1)
+    assert guarded.guard_active and guarded.fills == [] and [(f.intent, f.leg) for f in guarded.deferred] == [("L", "ENTRY")]

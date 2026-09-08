@@ -151,12 +151,49 @@ def _counts_as_entry(it: Intent, position_size: float) -> bool:
         return position_size == 0.0 or it.is_long == (position_size > 0)
     return False
 
-def dual_entry_guard(book: dict[str, Intent], position_size: float) -> bool:
-    entries = [it for it in book.values() if _counts_as_entry(it, position_size)]
-    longs = [it for it in entries if it.is_long and it.pure_stop]; shorts = [it for it in entries if not it.is_long and it.pure_stop]
-    if longs and shorts:
+# Member names of `strategy_last_bar_dual_entry_path`'s doxygen table in
+# ~/code/pineforge-engine-wt/main/include/pineforge/pineforge.h, codes 0..2
+# in the order the doc lists them (there is no C enum for this -- the
+# function just returns `int` -- so the names are pinned by a
+# header-reading test, same idea as classify.CLOSE_CAUSE_NAMES). `-1` is
+# not in the table: it is the NULL-handle error return.
+DUAL_ENTRY_PATH_NAMES: tuple[str, ...] = ("None", "LongFirst", "ShortFirst")
+DUAL_ENTRY_PATH_NONE: int = DUAL_ENTRY_PATH_NAMES.index("None")
+
+
+def dual_entry_guard(book: dict[str, Intent], position_size: float, dual_entry_path: int = DUAL_ENTRY_PATH_NONE) -> bool:
+    """Spec §4 evaluate 2's "never emit an intrabar TRIGGER when the
+    settled book holds two opposite pure-stop entries (`dual_entry_path !=
+    None`) or a resting priced entry opposite an open position's reversal
+    entry" -- the two clauses have two different sources.
+
+    The FIRST clause is the ENGINE's own signal (m9):
+    `RunResult.last_bar_dual_entry_path`, passed in by the caller from the
+    probe run it is guarding. The guard arms on a POSITIVE code
+    (`LongFirst`/`ShortFirst` -- the engine's broker emulator actually
+    arbitrated an opposite pure-stop pair on that bar); `0`
+    (`DUAL_ENTRY_PATH_NONE`: "not flat, no matching pair, or neither/only
+    one side touched") and the `-1` NULL-handle return do not.
+    Re-deriving it from the book -- "any long pure-stop entry rests AND
+    any short pure-stop entry rests" -- is strictly broader: it
+    suppresses every intrabar entry while a reversal stop merely rests on
+    the other side, however far away, so a script that always keeps one
+    resting never TRIGGERs at all (the fill then settles as `MISSED` and
+    is corrected a bar late, within budget). The engine reports whether
+    BOTH legs were actually touched on the path it ran.
+
+    The SECOND clause has no engine signal and stays a book rule: a priced
+    (stop or limit) entry resting OPPOSITE an open position is the
+    reversal entry, and an intrabar fill of it would cross zero on a
+    single print.
+
+    `dual_entry_path` defaults to `DUAL_ENTRY_PATH_NONE` so a caller with
+    no run to hand (a book-only consumer) gets the second clause alone
+    rather than a fabricated first one."""
+    if dual_entry_path > DUAL_ENTRY_PATH_NONE:
         return True
     if position_size != 0.0:
+        entries = [it for it in book.values() if _counts_as_entry(it, position_size)]
         want_long = position_size < 0
         return any(it.is_long == want_long and (it.stop is not None or it.limit is not None) for it in entries)
     return False

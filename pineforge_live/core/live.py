@@ -423,7 +423,7 @@ class LiveCore:
         classified = classify_bar(emulated, venue_fills,
                                   in_flight_intents=in_flight, mirrored_intents=mirrored, dead_band_qty=band,
                                   ledger_position=s.position_size, real_position=real_position,
-                                  entry_slip_bps=0.0, max_entry_slip_bps=self.rcfg.max_missed_entry_distance_bps)
+                                  max_entry_slip_bps=self.rcfg.max_entry_slip_bps)
         out.classified = classified
 
         age, dist = self._missed_bounds(classified, s.bar_index, price)

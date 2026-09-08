@@ -27,8 +27,18 @@ def test_book_diff_qty_only_change_reads_modified():
 
 
 def test_dual_entry_guard():
+    """m9: the two-opposite-pure-stop-entries clause is the ENGINE's own
+    `last_bar_dual_entry_path` (`>= 0`), not a book re-derivation -- the
+    book rule blocked EVERY intrabar entry while an opposite pure-stop
+    entry merely rested, however far away, which is strictly broader than
+    "both legs were touched on this path". The priced-entry-opposite-an-
+    open-position clause has no engine signal and stays a book rule."""
     two = {"L": intent("L", "ENTRY", True, stop=105.0), "S": intent("S", "ENTRY", False, stop=95.0)}
-    assert B.dual_entry_guard(two, position_size=0.0)
+    assert not B.dual_entry_guard(two, position_size=0.0)                       # resting is not touched
+    assert B.dual_entry_guard(two, position_size=0.0, dual_entry_path=1)        # LongFirst: the engine arbitrated the pair
+    assert B.dual_entry_guard({}, position_size=0.0, dual_entry_path=2)         # ShortFirst, whatever the book holds
+    assert not B.dual_entry_guard(two, position_size=0.0, dual_entry_path=B.DUAL_ENTRY_PATH_NONE)
+    assert not B.dual_entry_guard(two, position_size=0.0, dual_entry_path=-1)   # NULL-handle return, not a path
     one = {"L": intent("L", "ENTRY", True, stop=105.0)}
     assert not B.dual_entry_guard(one, position_size=0.0)
     rev = {"S": intent("S", "ENTRY", False, limit=95.0)}
@@ -42,9 +52,18 @@ def test_raw_order_counts_as_entry_only_when_opening_or_increasing_exposure():
     # book is flat. Same two intents, only position_size varies below: the
     # guard result flips purely on which RAW_ORDER(s) that admits.
     book = {"Rl": intent("Rl", "RAW_ORDER", True, stop=105.0), "Rs": intent("Rs", "RAW_ORDER", False, stop=95.0)}
-    assert B.dual_entry_guard(book, position_size=0.0)        # flat: both sides open exposure -> both count
-    assert not B.dual_entry_guard(book, position_size=1.0)    # long: Rs (opposite) excluded, Rl alone can't pair
-    assert not B.dual_entry_guard(book, position_size=-1.0)   # short: Rl (opposite) excluded, Rs alone can't pair
+    # m9: the flat case now belongs to the engine's own signal (there is
+    # no open position for the second clause to be about), so the RAW_ORDER
+    # admission is what the OPPOSITE-side clause reads: a reduce-side
+    # RAW_ORDER is not an entry and must not arm the guard.
+    assert not B.dual_entry_guard(book, position_size=1.0)    # long: Rs (opposite) is a reduce order, excluded
+    assert not B.dual_entry_guard(book, position_size=-1.0)   # short: Rl (opposite) is a reduce order, excluded
+    opening = {"Rs": intent("Rs", "RAW_ORDER", False, stop=95.0)}
+    assert not B.dual_entry_guard(opening, position_size=-1.0)   # same side as the position: an add, not a reversal
+    assert B.dual_entry_guard({"Rs": intent("Rs", "RAW_ORDER", False, stop=95.0),
+                               "Rl2": intent("Rl2", "RAW_ORDER", True, stop=105.0)}, position_size=-1.0) is False
+    entry_rev = {"S": intent("S", "ENTRY", False, stop=95.0)}
+    assert B.dual_entry_guard(entry_rev, position_size=1.0)      # a kind=ENTRY reversal order always counts
 
 def test_mirrorable():
     exit_ok = intent("x", "EXIT", True, stop=90.0, resolved=True)
@@ -225,3 +244,23 @@ def test_settled_book_keys_by_created_cycle_seq_across_a_flat_to_long_transition
     s = L.settle(bars[2007], 0); book_2007 = B.settled_book(h, s)
     d2 = B.book_diff(book_2006, book_2007)
     assert d2 == {"XL|EXIT|Long|0": B.IntentState.MODIFIED}
+
+
+def test_dual_entry_path_names_match_the_engine_header(engine_root):
+    """m9: `dual_entry_guard` arms on a POSITIVE `last_bar_dual_entry_path`
+    because the engine's own table says `0` is None ("not flat, no matching
+    pair, or neither/only one side touched") -- reading `-1` as the only
+    "no path" value would arm the guard on EVERY bar and defer every
+    intrabar entry forever. Parsed from the doxygen block on the
+    declaration itself (there is no C enum), same method as
+    `test_close_cause_names_and_synthetic_causes_match_engine_header`."""
+    import re
+    hdr = (engine_root / "include/pineforge/pineforge.h").read_text()
+    idx = hdr.index("PF_API int strategy_last_bar_dual_entry_path")
+    doc_end = hdr.rindex("*/", 0, idx)
+    doc = hdr[hdr.rindex("/**", 0, doc_end):doc_end]
+    found = dict(re.findall(r"`(-?\d+)`\s+([A-Za-z]+)", doc))
+    assert found, "no `<code>` Name entries found in the dual-entry-path doc block"
+    max_code = max(int(k) for k in found if int(k) >= 0)
+    assert B.DUAL_ENTRY_PATH_NAMES == tuple(found[str(i)] for i in range(max_code + 1))
+    assert B.DUAL_ENTRY_PATH_NONE == 0

@@ -91,8 +91,28 @@ def _side_for_leg(is_long: bool, leg: str) -> T.Side:
     a short, is a BUY; opening a short, or closing a long, is a SELL."""
     return T.Side.BUY if ((leg == "ENTRY") == is_long) else T.Side.SELL
 
+def entry_slip_bps(emulated_price: float, venue_price: float) -> float:
+    """The entry slip of ONE matched pair, in basis points (m1, spec §5.1):
+    `|venue price - emulated price| / emulated price x 1e4`. `0.0` when the
+    emulated price is non-positive or NaN (nothing to measure against).
+
+    Per PAIR, not per bar: `classify_bar` has both prices for every match
+    it makes, and a single bar-wide scalar (what the caller used to pass)
+    describes no particular fill -- with more than one matched ENTRY it
+    either mislabels the good one or excuses the bad one.
+
+    Caveat for a PYRAMIDING add: `SettleResult.entry_fills` prices an ENTRY
+    leg at `position_avg_price`, the post-fill BLENDED average across the
+    side (see its N7 note), so an add's emulated price is not that add's own
+    fill price and this ratio overstates its slip. Fine on the corpus
+    fixtures (none pyramids); a caller that does must reconstruct the add's
+    own price from the avg-price delta before trusting the number."""
+    if not (emulated_price > 0.0):
+        return 0.0
+    return abs(venue_price - emulated_price) / emulated_price * 1e4
+
 def classify_bar(emulated, venue, *, in_flight_intents, mirrored_intents, dead_band_qty, ledger_position, real_position,
-                 entry_slip_bps, max_entry_slip_bps) -> list[ClassifiedFill]:
+                 max_entry_slip_bps) -> list[ClassifiedFill]:
     """Classifies one bar's `emulated` (ledger-side) fills against its
     `venue` (venue-reported) fills (spec §4 settle 4/§5.3).
 
@@ -125,15 +145,28 @@ def classify_bar(emulated, venue, *, in_flight_intents, mirrored_intents, dead_b
     actual ledger position the way an ENTRY trigger against a flat/opposite
     ledger does).
 
-    A `PATH_DIVERGENT` venue fill suppresses at most ONE otherwise-unmatched
-    deferred mirrored EXIT (M1): the two are the same real-world
-    bracket-close event (the venue closed the cycle via a different leg
-    than the one the ledger's own recompute used), so reporting the
-    ledger's leg again as `MISSED` would just restate the divergence. The
-    pairing is 1:1 and scoped by close direction + qty (within
-    `dead_band_qty`), NOT call-global -- an unrelated cycle's genuinely
-    missed close (a same-bar round trip's own exit, spec's `new_opened`)
-    survives even when an earlier PATH_DIVERGENT already fired this call.
+    `PATH_DIVERGENT` is decided by PAIRABILITY (M2, spec §5.4's "net
+    position equal"): the branch fires only when an otherwise-unmatched
+    deferred emulated EXIT actually exists to pair the venue fill with --
+    same close direction, qty within `dead_band_qty`, a DIFFERENT intent
+    (the "different leg") -- because that pairing is what makes the two
+    fills one real-world cycle close and leaves the net position equal.
+    With no pairable exit the fill is NOT a path divergence at all: a
+    venue double-close (both bracket legs filling because OCO was not
+    honoured, or `closePosition` firing after the other leg) leaves the
+    venue a whole position short of a flat ledger, and it must fall
+    through to the position check -> `RETRACTED` -> `STOP(FLAT_ONLY)`
+    rather than be "continued" over.
+
+    The pairing is 1:1 and consumes the emulated exit it matched, so an
+    unrelated cycle's genuinely missed close (a same-bar round trip's own
+    exit, spec's `new_opened`) survives even when an earlier
+    PATH_DIVERGENT already fired this call. The paired emulated exit's own
+    `MISSED` is SUPPRESSED only when that exit is mirrored (M1): the two
+    are then the same bracket-close event seen from both sides, so
+    reporting the ledger's leg again would just restate the divergence;
+    in follow mode (nothing mirrored) the ledger's leg is a genuine
+    `MISSED` in its own right.
     """
     out: list[ClassifiedFill] = []
     venue_by_key: dict[tuple, list[VenueFill]] = {}
@@ -154,42 +187,57 @@ def classify_bar(emulated, venue, *, in_flight_intents, mirrored_intents, dead_b
         if v is None:
             deferred.append(e); continue
         matched.add(id(v))
-        if e.leg == "ENTRY" and entry_slip_bps > max_entry_slip_bps:
-            out.append(ClassifiedFill(FillClass.ENTRY_SLIP, e, v, v.qty - e.qty, f"entry slip {entry_slip_bps:.1f} bps > {max_entry_slip_bps}")); continue
+        slip = entry_slip_bps(e.price, v.price) if e.leg == "ENTRY" else 0.0
+        if e.leg == "ENTRY" and slip > max_entry_slip_bps:
+            out.append(ClassifiedFill(FillClass.ENTRY_SLIP, e, v, v.qty - e.qty, f"entry slip {slip:.1f} bps > {max_entry_slip_bps}")); continue
         delta = v.qty - e.qty
         if abs(delta) > dead_band_qty:
             out.append(ClassifiedFill(FillClass.QTY_DIVERGENT, e, v, delta, "same intent, qty beyond dead-band")); continue
         out.append(ClassifiedFill(FillClass.CONFIRMED, e, v, delta, ""))
     emulated_exit_intents = {e.intent for e in emulated if e.leg == "EXIT"}
-    path_divergent_fills: list[VenueFill] = []
+    # M1/M2: the deferred emulated EXIT each PATH_DIVERGENT venue fill was
+    # paired with (consumed 1:1), and of those, the ones whose own MISSED
+    # is suppressed because they were mirrored.
+    paired: set[int] = set()
+    suppressed: set[int] = set()
+
+    def _pairable_exit(v: VenueFill) -> EmulatedFill | None:
+        """The still-unpaired deferred emulated EXIT this venue EXIT fill
+        closes the same cycle as (M2): a DIFFERENT intent (the "other
+        leg"), the same close direction (`e.is_long` is the POSITION's
+        direction, and closing a long is a SELL), and the same qty within
+        the dead-band -- which together are what "net position equal"
+        means. `None` when nothing pairs."""
+        for e in deferred:
+            if id(e) in paired or e.leg != "EXIT" or e.intent == v.intent:
+                continue
+            if e.is_long == (v.side == T.Side.SELL) and abs(e.qty - v.qty) <= dead_band_qty:
+                return e
+        return None
+
     for v in venue:
         if id(v) in matched:
             continue
         if v.cause in (T.FillCause.LIQUIDATION, T.FillCause.ADL, T.FillCause.MANUAL) or (v.cause == T.FillCause.UNATTRIBUTED and v.intent is None):
             out.append(ClassifiedFill(FillClass.UNATTRIBUTED_VENUE, None, v, v.qty, f"venue-initiated ({v.cause.value})")); continue
         if v.leg == "EXIT" and (v.intent in mirrored_intents or v.executed_trigger):
-            if emulated_exit_intents and v.intent not in emulated_exit_intents:
+            e = _pairable_exit(v)
+            if e is not None:
+                paired.add(id(e))
+                if e.intent in mirrored_intents:
+                    suppressed.add(id(e))
                 out.append(ClassifiedFill(FillClass.PATH_DIVERGENT, None, v, v.qty, "venue closed the cycle via a different leg"))
-                path_divergent_fills.append(v)
                 continue
-            out.append(ClassifiedFill(FillClass.MIRROR_EARLY, None, v, v.qty, "mirrored level filled; ledger holds it")); continue
+            if not emulated_exit_intents or v.intent in emulated_exit_intents:
+                out.append(ClassifiedFill(FillClass.MIRROR_EARLY, None, v, v.qty, "mirrored level filled; ledger holds it")); continue
+            # Ours, an EXIT, and nothing on the ledger side it can pair
+            # with: a venue double-close, not a path divergence. Falls
+            # through to the position check below.
         if v.leg == "ENTRY" and v.executed_trigger and (ledger_position == 0.0 or (ledger_position > 0) != (v.side == T.Side.BUY)):
             out.append(ClassifiedFill(FillClass.TRIGGER_REVERSED, None, v, v.qty, "our TRIGGER executed, ledger flat/opposite")); continue
         if abs(real_position - ledger_position) > dead_band_qty:
             out.append(ClassifiedFill(FillClass.RETRACTED, None, v, v.qty, "venue fill without emulated counterpart; positions differ")); continue
         out.append(ClassifiedFill(FillClass.CONFIRMED, None, v, 0.0, "venue fill without counterpart within dead-band"))
-    # M1: pair each PATH_DIVERGENT venue fill with at most ONE deferred
-    # mirrored EXIT -- same close direction, qty within the dead-band --
-    # and suppress only that one; everything else in `deferred` (including
-    # an unrelated cycle's genuine MISSED) is unaffected.
-    suppressed: set[int] = set()
-    for v in path_divergent_fills:
-        for e in deferred:
-            if id(e) in suppressed:
-                continue
-            if e.leg == "EXIT" and e.intent in mirrored_intents and e.is_long == (v.side == T.Side.SELL) and abs(e.qty - v.qty) <= dead_band_qty:
-                suppressed.add(id(e))
-                break
     for e in deferred:
         if id(e) in suppressed:
             continue
@@ -199,34 +247,50 @@ def classify_bar(emulated, venue, *, in_flight_intents, mirrored_intents, dead_b
             out.append(ClassifiedFill(FillClass.MISSED, e, None, e.qty, "emulated fill, no venue fill, nothing in flight"))
     return out
 
-def _delta_candidates(ef: dict, book_diff: dict[str, IntentState], prev_book: dict) -> list:
-    """Every `prev_book` intent that LEFT the book this bar (`book_diff`
-    reads `CANCELLED` on its key -- "no longer resting", which covers a
-    fill), whose `kind` is one that can open/hold a position
-    (`ENTRY`/`MARKET`/`RAW_ORDER` -- never a bare `EXIT`), and whose side
-    matches the delta's own side -- in `book_diff` iteration order
-    (deterministic: `book_diff`'s `CANCELLED` keys are appended in
-    `prev_book`'s own insertion order, the mirror-index order).
+#: Order kinds that can OPEN or HOLD a position, and so can be the
+#: attribution candidate for a position-delta fill -- never a bare `EXIT`
+#: (see `probe._delta_fill`'s docstring / `book._counts_as_entry`'s
+#: RAW_ORDER case).
+ENTRYISH_KINDS: tuple[str, ...] = ("ENTRY", "MARKET", "RAW_ORDER")
+
+def delta_candidates(departed, leg: str, is_long: bool) -> list:
+    """THE attribution rule for a position-delta fill (m4), shared by the
+    ledger side (`_delta_candidates`, over `book_diff`) and the probe side
+    (`probe._delta_fill`, over the pre-run book vs the probe run's own
+    pending-order mirror): of the intents that LEFT the book this bar
+    (`departed`, in the caller's own deterministic order), those whose
+    `kind` is entry-ish and whose side matches the delta's, in that order.
 
     The side comparison is leg-aware (L6): for an ENTRY delta, the
     candidate order's side (`Intent.is_long`) equals the resulting
-    position's own direction (`ef["is_long"]`) -- an order that opens a
-    long position IS itself long. For an EXIT delta, the two conventions
-    are OPPOSITE: the candidate is a reduce-side order (see
-    `probe._delta_fill`'s docstring / `book._counts_as_entry`'s RAW_ORDER
-    case) whose side is the OPPOSITE of the position it reduces -- a SELL
-    order reduces a long."""
+    position's own direction (`is_long`) -- an order that opens a long
+    position IS itself long. For an EXIT delta, the two conventions are
+    OPPOSITE: the candidate is a reduce-side order whose side is the
+    OPPOSITE of the position it reduces -- a SELL order reduces a long.
+
+    Two rules for the same fill is a divergence with teeth: with two
+    same-side priced entries resting and only the second filling, a
+    "lowest resting index" rule attributes the fill to the first while
+    this one attributes it to the one that actually left the book, and the
+    probe's TRIGGER then carries an id the settlement never books
+    (`probe_not_settled` + a `skipped_position_mismatch` every such bar)."""
     out = []
-    for k, state in book_diff.items():
-        if state != IntentState.CANCELLED:
+    for it in departed:
+        if it.kind not in ENTRYISH_KINDS:
             continue
-        it = prev_book.get(k)
-        if it is None or it.kind not in ("ENTRY", "MARKET", "RAW_ORDER"):
-            continue
-        same_side = (it.is_long == ef["is_long"]) if ef["leg"] == "ENTRY" else (it.is_long != ef["is_long"])
-        if same_side:
+        if (it.is_long == is_long) if leg == "ENTRY" else (it.is_long != is_long):
             out.append(it)
     return out
+
+def _delta_candidates(ef: dict, book_diff: dict[str, IntentState], prev_book: dict) -> list:
+    """`delta_candidates` over the ledger's own departure signal: every
+    `prev_book` intent whose key reads `CANCELLED` in `book_diff` ("no
+    longer resting", which covers a fill), in `book_diff` iteration order
+    (deterministic: `CANCELLED` keys are appended in `prev_book`'s own
+    insertion order, the mirror-index order)."""
+    departed = [it for k, state in book_diff.items() if state == IntentState.CANCELLED
+                and (it := prev_book.get(k)) is not None]
+    return delta_candidates(departed, ef["leg"], ef["is_long"])
 
 def emulated_from_settle(s, book_diff: dict[str, IntentState], prev_book: dict) -> list[EmulatedFill]:
     """The bar's `EmulatedFill`s (spec §4 PLAN DEFECT ruling): the engine's

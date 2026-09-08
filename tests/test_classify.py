@@ -12,8 +12,11 @@ def vf(intent, leg="ENTRY", qty=1.0, side=T.Side.BUY, cause=T.FillCause.OURS, tr
     return C.VenueFill(intent, leg, side, qty, 100.5, 10, cause, "c1", trig)
 
 def base(**kw):
+    # em()/vf() price 100.0 vs 100.5 -> 50 bps of slip on every matched
+    # ENTRY pair, so `max_entry_slip_bps=50.0` is exactly at the bound and
+    # does not fire (m1: the comparison is strict).
     d = dict(in_flight_intents=set(), mirrored_intents=set(), dead_band_qty=0.001, ledger_position=1.0, real_position=1.0,
-             entry_slip_bps=0.0, max_entry_slip_bps=50.0)
+             max_entry_slip_bps=50.0)
     d.update(kw); return d
 
 def test_confirmed_and_missed_and_in_flight():
@@ -38,8 +41,12 @@ def test_synthetic_qty_divergent_mirror_early_trigger_reversed_retracted():
     assert r[0].cls == C.FillClass.UNATTRIBUTED_VENUE
 
 def test_entry_slip_and_path_divergent():
-    r = C.classify_bar([em("L")], [vf("L")], **base(entry_slip_bps=80.0))
-    assert r[0].cls == C.FillClass.ENTRY_SLIP
+    # m1: the slip is computed PER MATCHED PAIR from the two prices --
+    # |100.5 - 100.0| / 100.0 x 1e4 = 50 bps -- against the config's own
+    # `max_entry_slip_bps`, not handed in as a bar-wide scalar.
+    assert C.entry_slip_bps(100.0, 100.5) == 50.0 and C.entry_slip_bps(0.0, 100.5) == 0.0
+    r = C.classify_bar([em("L")], [vf("L")], **base(max_entry_slip_bps=10.0))
+    assert r[0].cls == C.FillClass.ENTRY_SLIP and "50.0 bps > 10.0" in r[0].note
     r = C.classify_bar([em("tp", "EXIT")], [vf("sl", "EXIT", side=T.Side.SELL)], **base(mirrored_intents={"tp", "sl"}, ledger_position=0.0, real_position=0.0))
     assert r[0].cls == C.FillClass.PATH_DIVERGENT
 
@@ -47,7 +54,8 @@ def test_entry_slip_and_path_divergent():
 def test_entry_slip_reports_the_real_qty_delta():
     # N10 (Task 5 review): ENTRY_SLIP must not force qty_delta to 0.0 when
     # the qty also diverged (P8) -- the journal loses the number otherwise.
-    r = C.classify_bar([em("L", qty=1.0)], [vf("L", qty=1.5)], **base(entry_slip_bps=80.0))
+    # (m1: an EXIT pair is never ENTRY_SLIP however far the prices sit.)
+    r = C.classify_bar([em("L", qty=1.0)], [vf("L", qty=1.5)], **base(max_entry_slip_bps=10.0))
     assert r[0].cls == C.FillClass.ENTRY_SLIP and abs(r[0].qty_delta - 0.5) < 1e-9
 
 
@@ -271,3 +279,51 @@ def test_emulated_from_settle_marks_ambiguous_when_a_candidate_has_no_fixed_qty(
     book_diff = {"L1|ENTRY||0": IntentState.CANCELLED, "L2|ENTRY||0": IntentState.CANCELLED}
     fills = C.emulated_from_settle(s, book_diff, prev_book)
     assert len(fills) == 1 and fills[0].intent == "?" and fills[0].ambiguous is True
+
+
+# ---- final wave: M2 (PATH_DIVERGENT by pairability) ----
+
+def _flat_only_over(classified):
+    """The STOP `reconcile()` raises over `classified` -- the second half
+    of the M2 claim (a venue double-close must reach the reconciler as
+    something it escalates over, not as a `path_divergent` counter)."""
+    from pineforge_live.core import reconcile as R
+    d = R.reconcile(R.ReconcileInput(bar_index=10, classified=classified, ledger_position=0.0, real_position=-1.0,
+                                     our_signed_fills=-1.0, price=100.0, quiescent=True, in_flight=set(),
+                                     stop_level=T.StopLevel.NONE, missed_age_bars=0, missed_distance_bps=0.0,
+                                     cfg=R.ReconcileConfig(1, 30.0, 10_000.0, 3, False),
+                                     dead_band=R.DeadBand(0.001, 0.001, 5.0), mirror_early_today=0))
+    return d.stop
+
+
+def test_a_venue_double_close_reads_retracted_not_path_divergent():
+    """M2: PATH_DIVERGENT means the venue closed the SAME cycle via the
+    OTHER leg -- "net position equal". When BOTH bracket legs fill on the
+    venue (OCO not honoured, or `closePosition` firing after the other
+    leg), the ledger's `tp` is CONFIRMED by the first fill and the second
+    (`sl`) has NO unmatched emulated exit left to pair with: the venue is
+    a whole position short against a flat ledger. Pre-fix that read
+    PATH_DIVERGENT purely because `sl` was a different id from the
+    ledger's own exit -- the reconciler bumped a counter, `basis == real`
+    so the account check passed, and nothing corrected or STOPped."""
+    tp_e = em("tp", "EXIT", qty=1.0, is_long=True)
+    tp_v = vf("tp", "EXIT", qty=1.0, side=T.Side.SELL)
+    sl_v = vf("sl", "EXIT", qty=1.0, side=T.Side.SELL)
+    r = C.classify_bar([tp_e], [tp_v, sl_v], **base(mirrored_intents={"tp", "sl"}, ledger_position=0.0, real_position=-1.0))
+    assert [c.cls for c in r] == [C.FillClass.CONFIRMED, C.FillClass.RETRACTED]
+    assert _flat_only_over(r) == (T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "RETRACTED: real ≠ ledger beyond dead-band")
+
+
+def test_path_divergent_needs_a_qty_and_direction_pairable_exit():
+    """M2, the two other halves of pairability: a deferred emulated EXIT
+    on the OTHER close direction, or one whose qty is beyond the
+    dead-band, is not the same cycle close and must not license
+    PATH_DIVERGENT either."""
+    other_direction = em("xs", "EXIT", qty=1.0, is_long=False)     # closes a SHORT -> a BUY
+    r = C.classify_bar([other_direction], [vf("sl", "EXIT", qty=1.0, side=T.Side.SELL)],
+                       **base(mirrored_intents={"xs", "sl"}, ledger_position=0.0, real_position=-1.0))
+    assert {c.cls for c in r} == {C.FillClass.MISSED, C.FillClass.RETRACTED}
+    wrong_qty = em("tp", "EXIT", qty=5.0, is_long=True)
+    r = C.classify_bar([wrong_qty], [vf("sl", "EXIT", qty=1.0, side=T.Side.SELL)],
+                       **base(mirrored_intents={"tp", "sl"}, ledger_position=0.0, real_position=-1.0))
+    assert {c.cls for c in r} == {C.FillClass.MISSED, C.FillClass.RETRACTED}

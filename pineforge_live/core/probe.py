@@ -9,14 +9,8 @@ from pineforge_live import types as T
 from pineforge_live.engine.handle import PATH_ORDER_AUTO, PATH_ORDER_HIGH_FIRST, PATH_ORDER_LOW_FIRST
 from pineforge_live.engine.report import RunResult
 from .book import settled_book, dual_entry_guard, Intent
-
-# Kinds `_delta_fill` will match an unexplained position-delta fill's
-# resolved side against, per the task-4 review's M1 fix and its
-# `created_now` ruling: an opening/adding entry (or a partial/margin-call
-# reduction) is attributed to a resting ENTRY, MARKET, or same-side
-# RAW_ORDER intent -- never a kind=="EXIT" row (see `_delta_fill`'s
-# docstring for why).
-_ENTRYISH_KINDS = ("ENTRY", "MARKET", "RAW_ORDER")
+from .classify import delta_candidates
+from .ids import intent_key_for
 
 # Tolerance for "is this float delta/qty actually nonzero/different", not
 # just floating-point noise from the engine's own arithmetic -- matches
@@ -104,27 +98,38 @@ def last_bar_fills(r: RunResult, n: int) -> list[ProbeFill]:
     return out
 
 
-def _resolve_intent(book: dict[str, Intent], is_long: bool) -> str:
-    """The settled book's resting ENTRY/MARKET/RAW_ORDER intent on the
-    `is_long` side, chosen deterministically as the lowest mirror `index`
-    among candidates; `"?"` if none rest on that side. Used by
-    `_delta_fill` to attribute a position-delta fill to the resting order
-    that must have caused it (spec §4 review finding 1).
+def _departed(book: dict[str, Intent], pending_orders: list) -> list[Intent]:
+    """The settled-book intents that are NO LONGER resting in a probe
+    run's own pending-order mirror (m4) -- the probe's half of the ONE
+    attribution rule (`classify.delta_candidates`): the ledger side reads
+    the same departure out of `book_diff`'s `CANCELLED` keys, and the two
+    must agree or the probe TRIGGERs an id the settlement never books.
 
-    N5 (design, v1-documented, re-review): this attributes ONE delta to
-    the lowest-index candidate, full stop -- it does not attempt to split
-    a delta across multiple same-side resting entries that could each
-    plausibly have contributed. Under `pyramiding >= 2`, two same-side
-    entries filling on the SAME bar would both be folded into the ledger's
-    single unexplained residual and so read as one `_delta_fill` of the
-    combined qty, attributed to whichever of the two has the lower mirror
-    index -- the other's own id is never surfaced. This mirrors
-    `ledger.py`'s `SettleResult.entry_fills`, which makes the identical
-    simplification (`Ledger._result`'s `unexplained` residual is also a
-    single synthesized fill, never two) -- fine for the corpus fixtures
-    (neither exercises same-bar multi-lot pyramiding), flagged here should
-    a later probe fixture exercise it."""
-    candidates = [it for it in book.values() if it.kind in _ENTRYISH_KINDS and it.is_long == is_long]
+    Keys are rebuilt from the raw mirror rows with `intent_key_for` (the
+    same keying `settled_book` uses), which reads no handle accessor and
+    so is safe on any run's result, not just the handle's last."""
+    resting = {intent_key_for(po, int(po["created_position_cycle_seq"])).s for po in pending_orders}
+    return [it for k, it in book.items() if k not in resting]
+
+
+def _resolve_intent(book: dict[str, Intent], pending_orders: list, leg: str, is_long: bool) -> str:
+    """The intent a position-delta fill on (`leg`, `is_long`) is attributed
+    to: the settled-book order that LEFT the book on that side during this
+    probe run (`classify.delta_candidates` over `_departed`), lowest mirror
+    `index` only when more than one did; `"?"` when none did.
+
+    N5 (design, v1-documented): this attributes ONE delta to ONE candidate
+    -- it does not split a delta across several same-side orders that could
+    each plausibly have contributed. Under `pyramiding >= 2`, two same-side
+    entries filling on the SAME bar are folded into the ledger's single
+    unexplained residual and read as one `_delta_fill` of the combined qty
+    attributed to the lower-index departure; the other's own id is never
+    surfaced. This mirrors `ledger.py`'s `SettleResult.entry_fills`, which
+    makes the identical simplification (`Ledger._result`'s `unexplained`
+    residual is also a single synthesized fill, never two) -- fine for the
+    corpus fixtures (neither exercises same-bar multi-lot pyramiding),
+    flagged here should a later probe fixture exercise it."""
+    candidates = delta_candidates(_departed(book, pending_orders), leg, is_long)
     return min(candidates, key=lambda it: it.index).key.order_id if candidates else "?"
 
 
@@ -146,21 +151,21 @@ def _delta_fill(r: RunResult, prev_position_size: float, forming: T.NormalizedBa
 
     Returns `None` when the delta is fully explained by closed trades.
 
-    `intent` is resolved from `book` -- the PRE-run settled book, i.e. the
-    book as of the ledger's last real settlement, before ANY probe run --
-    via `_resolve_intent`, restricted to kind ENTRY/MARKET/RAW_ORDER (never
-    EXIT: a closing/reducing intent is exposed to the venue mirror under
-    one of those three kinds too -- see `book.py`'s `_counts_as_entry`
-    docstring for the RAW_ORDER case), but ONLY for an ENTRY-leg fill. An
-    EXIT-leg fill (an unexplained delta that reduces, without closing, an
-    open position) always reads `intent="?"` (N2, task-4 re-review):
-    `_resolve_intent(book, is_long)` on the reducing side would return the
-    SAME-SIDE resting entry's id -- e.g. the `Long` entry -- for a fill
+    `intent` is resolved by `_resolve_intent` -- the order that left the
+    PRE-run settled `book` (the book as of the ledger's last real
+    settlement) during THIS run, restricted to kind ENTRY/MARKET/RAW_ORDER
+    (never EXIT: a closing/reducing intent is exposed to the venue mirror
+    under one of those three kinds too -- see `book.py`'s
+    `_counts_as_entry` docstring for the RAW_ORDER case), and only for an
+    ENTRY-leg fill. An EXIT-leg fill (an unexplained delta that reduces,
+    without closing, an open position) always reads `intent="?"` (N2,
+    task-4 re-review): the departed candidate on the reducing side would
+    be the SAME-SIDE resting entry -- e.g. the `Long` entry -- for a fill
     that REDUCED the long, never the order that actually did the
-    reducing; no candidate in `_ENTRYISH_KINDS` (ENTRY/MARKET/RAW_ORDER)
-    ever IS the reducing order, so returning one of them would mislabel
-    the fill instead of honestly admitting the id is unknown -- matching
-    the ledger's own `entry_fills`, which leaves `intent=None` for the
+    reducing; no candidate in `classify.ENTRYISH_KINDS` ever IS the
+    reducing order, so returning one of them would mislabel the fill
+    instead of honestly admitting the id is unknown -- matching the
+    ledger's own `entry_fills`, which leaves `intent=None` for the
     identical case. Practically unreachable on the corpus fixtures today
     (the engine books every reduction as a closed trade, so this branch
     never fires), but kept honest for whichever engine/script combination
@@ -176,7 +181,7 @@ def _delta_fill(r: RunResult, prev_position_size: float, forming: T.NormalizedBa
     leg = "ENTRY" if pos != 0.0 and (unexplained > 0) == (pos > 0) else "EXIT"
     is_long = (unexplained > 0) if leg == "ENTRY" else (prev_position_size > 0)
     price = r.position_avg_price if leg == "ENTRY" else forming.c
-    intent = _resolve_intent(book, is_long) if leg == "ENTRY" else "?"
+    intent = _resolve_intent(book, r.pending_orders, leg, is_long) if leg == "ENTRY" else "?"
     return ProbeFill(intent, leg, is_long, abs(unexplained), price, n, -1)
 
 
@@ -307,6 +312,11 @@ class Probe:
         # matter how many probe runs have happened on the handle since.
         book: dict[str, Intent] = self.L.last.book
         resting_ids = {it.key.order_id for it in book.values()}
+        # m9: the book half of the guard is all that is knowable before the
+        # run; the dual-entry-path half is P_auto's own report and is
+        # folded in below. An aborted run has no report to fold, so its
+        # `ProbeResult` carries the book half alone -- it emits no fills
+        # either way.
         guard = dual_entry_guard(book, self.L.last.position_size)
 
         p_auto = self._run(bars, PATH_ORDER_AUTO)
@@ -314,6 +324,8 @@ class Probe:
             ms = int((time.perf_counter() - t0) * 1000)
             self._journal(journal, forming, now_ms, "aborted", ms)
             return ProbeResult(n, forming, [], [], [], {}, guard, ms, False, [])
+
+        guard = dual_entry_guard(book, self.L.last.position_size, p_auto.last_bar_dual_entry_path)
 
         # M2 fix: capture the intrabar_best refresh's book IMMEDIATELY after
         # P_auto -- while the handle's last run is still P_auto's, not

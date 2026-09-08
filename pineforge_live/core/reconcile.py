@@ -29,9 +29,14 @@ class ReconcileConfig:
     single exposure-increasing correction (MISSED entry or QTY_DIVERGENT
     TOP_UP) in `qty * price` terms; `mirror_early_daily_cap` is the
     per-day count of MIRROR_EARLY fills tolerated before escalating
-    `STOP(FLAT_ONLY)`."""
+    `STOP(FLAT_ONLY)`; `max_entry_slip_bps` (m1, spec §5.1: seeded from the
+    L2/L3 measurement per leg kind) is the per-ENTRY slip budget
+    `classify.classify_bar` reads a matched pair's `ENTRY_SLIP` off --
+    the MISSED distance bound is a different quantity and was the wrong
+    knob for it."""
     max_missed_age_bars: int; max_missed_entry_distance_bps: float; budget_notional: float
     mirror_early_daily_cap: int; adopt_ledger_position: bool
+    max_entry_slip_bps: float = 50.0
 
 @dataclass(frozen=True)
 class CorrectionRequest:
