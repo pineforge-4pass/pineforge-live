@@ -18,8 +18,8 @@ receiver, and Apache-2.0 package metadata. The README and docs/webhooks.md
 are the supported public workflow. Broker-specific work below is historical,
 not unfinished work for this contract.
 
-Validation in progress: 813 tests passed with the ABI-v4 engine; 666 passed
-and 147 skipped without it. Generic HTTP and WebSocket transport, compiled
+The public webhook workflow is complete. Final validation: **834 tests
+passed with the ABI-v4 engine; 683 passed and 151 skipped without it**. Generic HTTP and WebSocket transport, compiled
 strategy to signed HTTP delivery, queue/receiver crash recovery, and no
 duplicate actions after restart are tested. Independent review found and
 fixed lease-before-POST timing, long-recompute SQLite contention, artifact-
@@ -29,7 +29,8 @@ writes without holding SQLite's writer lock, and rechecks authority in the
 short atomic commit. A real subprocess sender/receiver demo delivered 37
 signed unique events across SMA, bracket and orders-on-close strategies;
 restarting each through `check` delivered zero duplicates. Final exact-
-candidate Grok review follows.
+candidate Grok review is **GREEN (P0=0, P1=0, P2=0)** on code commit
+`8dc00c0758f5ccf1ca6239d6fab8c53337b8ba5c`.
 
 No push or public repository creation is performed; the earlier no-push
 instruction remains in force.
@@ -49,10 +50,13 @@ path collisions (including symlinks), preserve finite neutral reference
 prices, and evaluate volume-only updates. Compiler licensing remains separate
 from this runtime's Apache-2.0 license.
 
-The revised suite passed 833 engine-backed tests and 683 tests with 150 skips
-without the engine; a further real oversized-WebSocket runtime regression
-also passed. Final exact-candidate totals, wheel digest, installed-package
-signed-HTTP readback and the final Grok verdict are saved in
+Final suite: **834 engine-backed tests passed; 683 passed and 151 skipped
+without the engine**. The final independent Grok re-review is GREEN on
+`8dc00c0758f5ccf1ca6239d6fab8c53337b8ba5c` with all five findings fixed and
+no remaining P0/P1/P2 issues. The rebuilt wheel ran outside the repository,
+delivered 37 signed unique events, and delivered zero duplicates on restart.
+Exact-candidate totals, wheel digest, installed-package signed-HTTP readback
+and both Grok reviews are saved in
 `build/webhook-review/verification.json`. No push is performed.
 
 ## Historical work before the webhook clarification
