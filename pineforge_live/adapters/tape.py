@@ -153,7 +153,7 @@ class TapeTickSource:
                 prev_seq = None
                 for r in csv.DictReader(fh):
                     seq = int(r["seq"])
-                    if prev_seq is not None and seq - prev_seq > 1 and seq >= from_seq:
+                    if prev_seq is not None and seq - prev_seq > 1 and seq - 1 >= from_seq:
                         yield T.TickGap(prev_seq, seq, healed=False)
                     prev_seq = seq
                     if seq < from_seq: continue

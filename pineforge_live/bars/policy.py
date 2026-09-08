@@ -23,13 +23,24 @@ _MONDAY_EPOCH_OFFSET_MS = 4 * 86_400_000
 _TF_RE = re.compile(r"^[0-9]+[DW]?$")
 _BARE_UNIT_RE = re.compile(r"^[DW]$")
 _MAX_MULT = 1_000_000
+# The engine computes tf-in-seconds in a signed 32-bit int
+# (src/timeframe.cpp:84-105: `n * 86400` / `n * 604800`, no widening), so
+# _MAX_MULT alone is not enough to keep a D/W timeframe in range -- a
+# multiplier that fits _MAX_MULT can still overflow once multiplied by a
+# day/week's seconds. Bound the product instead of the multiplier.
+_MAX_SECONDS = 2**31 - 1
 
 def tf_ms(tf: str) -> int:
+    """`tf` (e.g. `"15"`, `"1D"`, `"W"`) in milliseconds, or raise
+    `ValueError` for anything the closed ASCII grammar (or the engine's
+    32-bit-seconds domain) can't hold -- see the module comment above for
+    why this must be a strict subset of what the engine's own stoi cast
+    accepts."""
     if not isinstance(tf, str) or not tf.isascii():
         raise ValueError(f"bad timeframe {tf!r}")
-    if _BARE_UNIT_RE.match(tf):
+    if _BARE_UNIT_RE.fullmatch(tf):
         mult, unit = 1, tf
-    elif _TF_RE.match(tf):
+    elif _TF_RE.fullmatch(tf):
         if tf[-1] in _UNITS:
             mult, unit = int(tf[:-1]), tf[-1]
         else:
@@ -38,9 +49,15 @@ def tf_ms(tf: str) -> int:
         raise ValueError(f"bad timeframe {tf!r}")
     if not (0 < mult <= _MAX_MULT):
         raise ValueError(f"bad timeframe {tf!r}")
-    return mult * (_UNITS[unit] if unit else 60_000)
+    ms = mult * (_UNITS[unit] if unit else 60_000)
+    if ms // 1000 > _MAX_SECONDS:
+        raise ValueError(f"bad timeframe {tf!r}")
+    return ms
 
 def bucket_start(ts_ms: int, tf: str) -> int:
+    """The start (ms since epoch) of the `tf`-bucket containing `ts_ms`:
+    24x7 UTC buckets, Monday-anchored for weekly timeframes (see the
+    module-level comment on `_MONDAY_EPOCH_OFFSET_MS`)."""
     m = tf_ms(tf)
     if tf[-1] == "W":
         return ts_ms - ((ts_ms - _MONDAY_EPOCH_OFFSET_MS) % m)

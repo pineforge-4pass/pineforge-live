@@ -92,3 +92,11 @@ def test_real_tick_policy_emits_tick_gap_on_seq_discontinuity(tmp_path):
     kinds = [(type(e).__name__, e.tick.seq if isinstance(e, T.Tick) else (e.from_seq, e.to_seq)) for e in events]
     assert kinds == [("Tick", 8), ("TickGap", (8, 10)), ("Tick", 10)]
     assert events[1].healed is False
+
+    # Finding 6: a hole entirely below from_seq is not this subscriber's
+    # concern -- from_seq=10 skips straight to Tick(10) with no TickGap,
+    # even though the underlying file has a seq jump (8 -> 10) before it.
+    src2 = tape.TapeTickSource(bars(), "15", "real", ticks_csv=p)
+    events2 = collect(src2.subscribe(T.InstrumentId("X", T.MarketType.PERP, "Y"), 10))
+    kinds2 = [(type(e).__name__, e.tick.seq if isinstance(e, T.Tick) else (e.from_seq, e.to_seq)) for e in events2]
+    assert kinds2 == [("Tick", 10)]

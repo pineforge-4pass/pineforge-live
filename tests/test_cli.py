@@ -32,7 +32,7 @@ def test_journal_inspect_reports_armed_and_present_stop_marker(tmp_path):
     assert r.returncode == 0 and "stop_marker present" in r.stdout, r.stderr
 
 
-def test_journal_inspect_missing_journal_is_a_usage_error(tmp_path):
+def test_journal_inspect_missing_journal_is_an_error(tmp_path):
     r = run("journal-inspect", str(tmp_path / "does-not-exist.sqlite3"))
     assert r.returncode == 1 and "error:" in r.stderr
 

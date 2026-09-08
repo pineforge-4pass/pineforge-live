@@ -31,7 +31,23 @@ def test_tf_ms_rejects_process_abort_escapes():
     # decimal digit int()/str.isdigit() both accept ("١٥", Arabic-Indic 15) and a
     # multiplier stoi can't hold ("99999999999"). Both must now be rejected
     # in Python, before any engine call.
-    for bad in ("١٥", "99999999999", "15 ", " 15"):
+    #
+    # Finding 1: Python's `$` in re.match admits a trailing newline, so the
+    # grammar must use fullmatch (or \Z) -- "15\n" used to be accepted (a
+    # different epoch_hash from "15" even though the engine treats them the
+    # same) and "D\n" raised KeyError instead of ValueError. Pinned here too.
+    for bad in ("١٥", "99999999999", "15 ", " 15", "15\n", "D\n"):
+        with pytest.raises(ValueError):
+            policy.tf_ms(bad)
+
+def test_tf_ms_bounds_seconds_not_just_the_multiplier():
+    # Finding 2: the engine computes tf-in-seconds in a signed 32-bit int
+    # (day/week multipliers get multiplied by 86400/604800 with no
+    # widening), so a multiplier within _MAX_MULT can still overflow once
+    # converted to seconds. tf_ms must bound the product, not just the
+    # multiplier: 24855D/3550W fit; 24856D/3551W overflow and must raise.
+    assert policy.tf_ms("24855D") == 24855 * 86_400_000
+    for bad in ("24856D", "3551W"):
         with pytest.raises(ValueError):
             policy.tf_ms(bad)
 

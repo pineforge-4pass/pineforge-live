@@ -1,6 +1,7 @@
 """Epoch, code identity and runtime configuration (spec §1)."""
 from __future__ import annotations
 import copy
+from collections.abc import Sequence
 from dataclasses import dataclass, field, asdict
 from pineforge_live import ADAPTER_API_VERSION
 from pineforge_live import types as T
@@ -58,8 +59,11 @@ class EpochSpec:
     """
     venue: str; instrument: T.InstrumentId; script_tf: str; history_start_ms: int; horizon_bars: int
     code_identity: CodeIdentity; syminfo: T.EngineSyminfo; reference_tape_sha256: str
-    inputs: list[tuple[str, str]] = field(default_factory=list)
-    overrides: list[tuple[str, str]] = field(default_factory=list)
+    # Constructor input may be any Sequence of (key, value) pairs; __post_init__
+    # coerces to tuple[tuple[str, str], ...] below (F4), which is what every
+    # instance actually holds -- annotated as the input shape, not the stored one.
+    inputs: Sequence[tuple[str, str]] = field(default_factory=list)
+    overrides: Sequence[tuple[str, str]] = field(default_factory=list)
     realtime_tail: bool = True; probe_suppress_tail_logic: bool = True
     path_order_policy: str = "AUTO+OTHER"; trail_refresh_policy: str = "bar_open_level"
     trade_start_ms: int | None = None
