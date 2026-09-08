@@ -398,3 +398,18 @@ def test_recompute_ms_is_measured_in_float_milliseconds(test_so, test_feed, tmp_
               [b["settle_recompute_ms"] for b in doc["bars"] if b["settle_recompute_ms"] is not None]
     assert samples and all(isinstance(x, float) for x in samples)
     assert any(x != int(x) for x in samples), samples      # real sub-ms resolution, not floats holding integers
+
+def test_settled_sigs_excludes_a_fill_carried_from_an_earlier_bar():
+    """N-5: `out.classified` carries MISSED fills re-presented from the
+    PREVIOUS bar (M4a), whose `emulated.bar_index` is that earlier bar.
+    Counting one as this bar's settle fill inflates `settle_fills` and --
+    worse -- can excuse a genuine `probe_not_settled` for the same sig,
+    which is the single assertion the harness exists for. The perfect venue
+    never produces a carry, so nothing in the L1 runs would notice."""
+    h = _module()
+    from pineforge_live.core.classify import ClassifiedFill, EmulatedFill, FillClass
+    now = ClassifiedFill(FillClass.CONFIRMED, EmulatedFill("L", "ENTRY", True, 1.0, 100.0, 11), None, 0.0, "")
+    carried = ClassifiedFill(FillClass.MISSED, EmulatedFill("S", "EXIT", False, 1.0, 100.0, 10), None, 1.0, "")
+    assert h.settled_sigs([now, carried], 11) == {("L", "ENTRY", True)}
+    assert h.settled_sigs([now, carried], 10) == {("S", "EXIT", False)}
+    assert h.settled_sigs([ClassifiedFill(FillClass.MIRROR_EARLY, None, None, 1.0, "")], 11) == set()

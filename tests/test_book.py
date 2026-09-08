@@ -28,7 +28,7 @@ def test_book_diff_qty_only_change_reads_modified():
 
 def test_dual_entry_guard():
     """m9: the two-opposite-pure-stop-entries clause is the ENGINE's own
-    `last_bar_dual_entry_path` (`>= 0`), not a book re-derivation -- the
+    `last_bar_dual_entry_path` (`> 0`), not a book re-derivation -- the
     book rule blocked EVERY intrabar entry while an opposite pure-stop
     entry merely rested, however far away, which is strictly broader than
     "both legs were touched on this path". The priced-entry-opposite-an-

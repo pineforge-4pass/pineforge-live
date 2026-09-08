@@ -184,14 +184,22 @@ Four bounds sit around the table, and all four bind:
   emits are tallied per UTC day and refused past the cap (incident +
   `cycle_skipped`) — the low-n guard on corrections, because the G3 rate
   breakers are alert-only below their own `n_min` (381 samples at θ = 1%).
-- **`horizon_bars`.** Checked before each recompute: an alert incident once at
-  80% consumption, and at 100% `STOP(FLAT_ONLY, "horizon")` with the settle
+- **`horizon_bars`.** Checked before each recompute, against `ledger.n` — the
+  index of the bar about to be settled. `horizon_bars` *is* the frozen
+  `last_bar_index`, so bar index `horizon_bars - 1` is still a legal bar and bar
+  index `horizon_bars` is the first one refused. An alert incident once at 80%
+  consumption, and at 100% `STOP(FLAT_ONLY, "horizon")` with the settle
   **refused** — spec §2's "forces an epoch rotation before the next
   settlement". The rotation itself is an operator ceremony (spec §6).
 
 The mirror-early and daily-reconcile tallies are re-derived from the day's own
-journaled `reconciles` rows at construction, so neither cap can be laundered by
-restarting the process.
+journaled `reconciles` rows at construction — and the restored day is adopted as
+the current one, so the first settle after a restart does not roll over it —
+which is what stops either cap from being laundered by bouncing the process. The
+restore joins on the rows' wall-clock `created_ms` while the roll uses the
+settled bar's own `ts_open`: the two agree in a live run, and on a replayed tape
+the restore is a bounded over-count on the first bar (the cap binds sooner,
+never later).
 
 **The account contract is strict.** `real_position` must be the venue's own
 snapshot *event-time after the last fill in `venue_fills`* — spec §5.4's
@@ -229,7 +237,11 @@ The `HARD_FLAT` is the one order the reconciler does not produce: it is not a
 correction toward the ledger but the STOP's own disposition acting on venue
 truth, so `settle()` emits it from the STOP state — once, journaled as an
 incident, and only while `real_position` is non-zero, so a restart re-issues it
-only if the venue still holds a position. The dead-man, the re-established
+only if the venue still holds a position. Being a STOP action and not a
+correction, it is counted against neither `max_daily_reconciles` nor
+`max_order_notional`: the exposure is the position the venue *already* holds and
+the order only reduces it. It is marked issued only once it has passed the
+STOP/RiskGuard gate, so a refused one is retried while the position stands. The dead-man, the re-established
 static exits and `hold_expired()`'s escalation are B3's.
 
 Rules that hold everywhere:
@@ -274,7 +286,7 @@ target_bar_index)`.
 | `MARKET_NOW` | `settle` | a `process_orders_on_close` fill (`SETTLE_ONLY`): the order never rested, so there is no leg to ask for at the next open — the venue is taken to the ledger's position *now*, at this bar's close. `target_bar_index` is `n` |
 | `SYNTHETIC_CLOSE` | `settle` | an engine-forced close (margin call / intraday cap), reduce-only. `intent` is the closed trade's exit id, or `__synthetic__` when the engine booked none (a margin call does) |
 | `CORRECTION` | `settle` | a reconciler `MARKET_CORRECT` / `REDUCE_ONLY_TRIM` / `TOP_UP`; `cls` names which |
-| `FLATTEN` | `settle` | reduce real exposure to zero (`TRIGGER_REVERSED`, `ENTRY_SLIP`) |
+| `FLATTEN` | `settle` | reduce real exposure to zero. `cls` says which of two orders it is: `FLATTEN` — the reconciler's own, from a `TRIGGER_REVERSED`/`ENTRY_SLIP` fill, counted against `max_daily_reconciles` and budget-gated like any correction; or `HARD_FLAT` — spec §5.5(c)'s STOP action (see the STOP section), gated by neither |
 | `CANCEL_STALE_CYCLE` | `settle` **and** `evaluate` | an intent that left the settled book **unfilled**; `book_diff` reads `CANCELLED` for a filled order too, so the bar's own *venue* fills disambiguate — a mirrored exit the ledger filled and the venue did not is still resting there and must be chased. From `evaluate` it withdraws a settled advance whose re-quote the STOP/RiskGuard refused. `qty` is 0 — a book op, not a fill |
 
 `intent` is always the **Pine order id**, never an `IntentKey.s`: that is the

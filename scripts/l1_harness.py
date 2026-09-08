@@ -230,6 +230,21 @@ def sig(x) -> list:
     return [x.intent, x.leg, x.is_long]
 
 
+def settled_sigs(classified, bar_index: int) -> set:
+    """The sigs THIS bar's settlement produced -- `CoreOutput.classified`
+    filtered to the fills the ledger emulated for `bar_index` itself.
+
+    N-5: `classified` also carries MISSED fills RE-PRESENTED from an earlier
+    bar (M4a's `_carried_missed`), whose `emulated.bar_index` is that
+    earlier bar. Counting one as this bar's settle fill inflates
+    `settle_fills` and -- worse -- subtracts it from `ProbeTally.owed`,
+    excusing a genuine `probe_not_settled` for the same sig, which is the
+    one assertion this harness exists to make. The perfect venue never
+    produces a carry, so no L1 run would have noticed."""
+    return {(c.emulated.intent, c.emulated.leg, c.emulated.is_long)
+            for c in classified if c.emulated is not None and c.emulated.bar_index == bar_index}
+
+
 def action_json(a) -> dict:
     return {"kind": a.kind, "intent": a.intent, "qty": a.qty, "reduce_only": a.reduce_only,
             "target_bar_index": a.target_bar_index, "reason": a.reason}
@@ -423,12 +438,11 @@ def _cadence(args, spec, handle, journal, marker, feed) -> tuple[dict, int]:
                 row["g1"] = "journal_hash_mismatch"
                 g1_failed.add(i)
 
-            settled_sigs = {(c.emulated.intent, c.emulated.leg, c.emulated.is_long)
-                            for c in out.classified if c.emulated is not None}
-            row["settle_fills"] = sorted(list(x) for x in settled_sigs)
+            sigs = settled_sigs(out.classified, s.bar_index)
+            row["settle_fills"] = sorted(list(x) for x in sigs)
             row["actions"] = [action_json(a) for a in out.actions]
             # Ruling 2 / spec §10.2: probe fills ⊆ settlement fills ∪ PROBE_RETRACT.
-            row["probe_not_settled"] = sorted(list(p) for p in probe.owed(settled_sigs))
+            row["probe_not_settled"] = sorted(list(p) for p in probe.owed(sigs))
             bars_out.append(row)
 
             owed = [a for a in out.actions if a.kind not in NON_FILL_ACTIONS]
