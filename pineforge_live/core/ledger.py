@@ -2,13 +2,13 @@
 from __future__ import annotations
 import math, time
 from dataclasses import dataclass
-from typing import Any, Sequence, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 from pineforge_live import types as T
 from pineforge_live.bars.builder import bars_hash as roll_hash, compare_bar
 from pineforge_live.bars.policy import tf_ms
 from pineforge_live.engine.report import RunResult, TradeRow
 from pineforge_live.journal import JournalConflict
-from .ids import TradeKey, trade_keys
+from .ids import TradeKey, trade_keys, keys_sha256
 
 if TYPE_CHECKING:
     # Type-checking only (see `Ledger._settled_book`): the runtime import is
@@ -56,17 +56,6 @@ class LedgerGap(ValueError):
         reason = "bar is still forming" if forming else f"expected ts_open {expected}, got {got}"
         super().__init__(f"non-contiguous bar {got}: {reason}")
         self.expected, self.got, self.forming = expected, got, forming
-
-
-def keys_sha256(keys: Sequence[TradeKey]) -> str:
-    """sha256 (hex) over an already-computed, ORDER-SENSITIVE list of
-    `TradeKey`s -- the same digest `ids.trades_sha256` computes from raw
-    trades, but taking keys directly so `settle()`'s G1 check can hash an
-    arbitrary sub-prefix of `SettleResult.keys` without re-deriving keys
-    from trades. Lives here (not in `ids.py`) per the controller ruling,
-    to avoid a concurrent edit collision with Task 4's `ids.py` changes;
-    a later task moves it there."""
-    return T.canonical_sha256([list(k.__dict__.values()) for k in keys])
 
 
 def _prefix_mismatch_detail(m: int, prefix: list[TradeKey], prev_keys: list[TradeKey]) -> dict[str, Any]:

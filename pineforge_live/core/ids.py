@@ -133,3 +133,13 @@ def intent_key_for(po: dict, cycle_seq: int) -> IntentKey:
     """`IntentKey` for one engine pending-order mirror row `po`, tagged with
     the settlement's `cycle_seq` (the position cycle it was created under)."""
     return IntentKey(po["id"], order_type_name(int(po["type"])), po.get("from_entry", ""), int(cycle_seq))
+
+
+def keys_sha256(keys: Sequence[TradeKey]) -> str:
+    """sha256 (hex) over an already-computed, ORDER-SENSITIVE list of
+    `TradeKey`s -- the same digest `trades_sha256` computes from raw
+    trades, but taking keys directly so `ledger.settle()`'s G1 check can
+    hash an arbitrary sub-prefix of `SettleResult.keys` without re-deriving
+    keys from trades. Moved here from `ledger.py` (single copy; `ledger.py`
+    imports it) per the Task 6 prelim ruling."""
+    return canonical_sha256([list(dataclasses.astuple(k)) for k in keys])

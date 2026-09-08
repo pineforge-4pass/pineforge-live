@@ -1,3 +1,4 @@
+import pytest
 from pineforge_live.core import book as B
 from pineforge_live.core import ids
 from pineforge_live.core.ids import IntentKey
@@ -5,15 +6,25 @@ from pineforge_live.core.ledger import Ledger
 from tests.helpers import load_bars, make_handle, corpus_spec, corpus_spec_bracket, open_journal
 
 def intent(oid, kind, is_long, stop=None, limit=None, from_entry="", resolved=True, created_bar=0, seq=1,
-           qty=None, qty_percent=None, requested_partial=False):
+           qty=None, qty_percent=None, requested_partial=False, full_percent_exit_request=False):
     return B.Intent(IntentKey(oid, kind, from_entry, seq), 0, is_long, kind, from_entry, stop, limit, None, resolved, created_bar,
-                     qty, qty_percent, requested_partial, B.content_hash(stop, limit, None, is_long, qty))
+                     qty, qty_percent, requested_partial, full_percent_exit_request,
+                     B.content_hash(stop, limit, None, is_long, qty))
 
 def test_book_diff_states():
     a = {"x": intent("x", "EXIT", True, stop=90.0), "y": intent("y", "EXIT", True, limit=110.0)}
     b = {"x": intent("x", "EXIT", True, stop=91.0), "z": intent("z", "ENTRY", False, stop=120.0)}
     d = B.book_diff(a, b)
     assert d == {"x": B.IntentState.MODIFIED, "y": B.IntentState.CANCELLED, "z": B.IntentState.RESTING}
+
+def test_book_diff_qty_only_change_reads_modified():
+    # Nit 8 (Task 5 review): content_hash covers qty (L3), but nothing
+    # pinned that a qty-only change (same stop/limit) actually reads
+    # MODIFIED, not "unchanged".
+    a = {"x": intent("x", "EXIT", True, stop=90.0, qty=1.0)}
+    b = {"x": intent("x", "EXIT", True, stop=90.0, qty=2.0)}
+    assert B.book_diff(a, b) == {"x": B.IntentState.MODIFIED}
+
 
 def test_dual_entry_guard():
     two = {"L": intent("L", "ENTRY", True, stop=105.0), "S": intent("S", "ENTRY", False, stop=95.0)}
@@ -68,10 +79,30 @@ def test_mirrorable_excludes_partial_exit_and_pyramided_legs():
     whole_no_qty = intent("XL", "EXIT", False, stop=90.0, resolved=True, qty=None)
     assert B.mirrorable(whole_no_qty, position_size=2.0)
 
+
+def test_mirrorable_qty_vs_position_has_a_dead_band_epsilon():
+    # Nit 9 (Task 5 review): a fp-summed pyramided position (0.1+0.1+0.1 ==
+    # 0.30000000000000004) with a whole-position leg at qty=0.3 must not
+    # misread abs(qty) < abs(position_size) as "smaller" (a difference of
+    # ~5.5e-17) and wrongly exclude it as a partial leg -- the default eps
+    # (1e-9) covers this; a caller-supplied dead-band (LiveCore's own
+    # DeadBand) works the same way for a coarser tolerance.
+    position = 0.1 + 0.1 + 0.1
+    assert position != 0.3   # sanity: this really is fp noise, not exact
+    whole_qty_leg = intent("XL", "EXIT", False, stop=90.0, resolved=True, qty=0.3)
+    assert B.mirrorable(whole_qty_leg, position_size=position)
+    # A genuinely smaller qty (beyond eps) is still excluded.
+    half_leg = intent("HALF", "EXIT", False, stop=90.0, resolved=True, qty=0.15)
+    assert not B.mirrorable(half_leg, position_size=position)
+    # A caller-supplied (coarser) dead-band widens the tolerance further.
+    almost_whole = intent("ALMOST", "EXIT", False, stop=90.0, resolved=True, qty=0.299)
+    assert not B.mirrorable(almost_whole, position_size=position)
+    assert B.mirrorable(almost_whole, position_size=position, eps=0.01)
+
 class _FakeHandle:
     """Stub `effective_levels`/`level_resolved` accessors, keyed by index --
-    for pinning `settled_book`'s stale-handle degrade path (review finding
-    2) without a real engine run."""
+    for pinning `settled_book`'s stale-handle raise path (L5, restored in
+    the Task 6 prelim) without a real engine run."""
     def __init__(self, by_index: dict[int, tuple]):
         self._by_index = by_index
     def effective_levels(self, i):
@@ -79,27 +110,41 @@ class _FakeHandle:
     def level_resolved(self, i):
         return self._by_index[i][1]
 
-def test_settled_book_degrades_a_stale_index_instead_of_fabricating_a_price():
-    # Review finding 2: a stale handle read (effective_levels rc != 0, or
-    # level_resolved < 0) must not fabricate a plausible-looking Intent
-    # from the mirror row's raw stop_price/limit_price -- it degrades to
-    # "unresolved, no price", same shape as an ordinary not-yet-resolved
-    # order. (A hard RuntimeError was tried for this and reverted -- see
-    # `settled_book`'s docstring: it broke Probe.evaluate()'s steady-state
-    # usage, verified live in tests/test_probe.py.)
-    po = {"index": 0, "id": "x", "type": 2, "is_long": True, "from_entry": "", "created_position_cycle_seq": 1,
-          "created_bar": 5, "stop_price": 90.0, "limit_price": float("nan"), "qty": float("nan"), "qty_percent": float("nan")}
+def _po(**kw):
+    d = dict(index=0, id="x", type=2, is_long=True, from_entry="", created_position_cycle_seq=1,
+             created_bar=5, stop_price=90.0, limit_price=float("nan"), qty=float("nan"), qty_percent=float("nan"),
+             requested_partial=0, full_percent_exit_request=0)
+    d.update(kw); return d
+
+def test_settled_book_raises_on_a_stale_index_instead_of_fabricating_a_price():
+    # L5 (Task 5 review, restored in the Task 6 prelim now that `book` is
+    # only ever built inside the settle/seed accessor window -- see
+    # `Ledger._settled_book`/`SettleResult.book` and `Probe.evaluate`'s use
+    # of `self.L.last.book`): a stale handle read (effective_levels
+    # rc != 0, or level_resolved < 0) is a genuine contract violation now,
+    # not a normal not-yet-resolved order (rc==0, level_resolved==0) --
+    # must raise loudly instead of fabricating/degrading a plausible Intent
+    # from the mirror row's raw (possibly stale) price fields.
     class R:
-        pending_orders = [po]
+        pending_orders = [_po()]
     h = _FakeHandle({0: ((-1, float("nan"), float("nan"), float("nan")), -1)})   # bad index: rc=-1, level_resolved=-1
-    bk = B.settled_book(h, R())
-    it = bk["x|EXIT||1"]
-    assert it.level_resolved is False and it.stop is None and it.limit is None and it.activation is None
+    with pytest.raises(RuntimeError):
+        B.settled_book(h, R())
     # rc==0 but level_resolved==-1 (shouldn't happen from a real accessor,
-    # but the guard is `rc != 0 or lr < 0`, not `rc != 0 and lr < 0`) degrades too.
+    # but the guard is `rc != 0 or lr < 0`, not `rc != 0 and lr < 0`) raises too.
     h2 = _FakeHandle({0: ((0, 90.0, float("nan"), float("nan")), -1)})
-    bk2 = B.settled_book(h2, R())
-    assert bk2["x|EXIT||1"].level_resolved is False and bk2["x|EXIT||1"].stop is None
+    with pytest.raises(RuntimeError):
+        B.settled_book(h2, R())
+
+def test_settled_book_normal_read_is_unaffected_by_the_stale_raise():
+    # Companion pin: a normal not-yet-resolved order (rc==0, level_resolved==0)
+    # -- the shape every probe path produces via self.L.last.book, never a
+    # re-read against a stale handle -- must NOT raise.
+    class R:
+        pending_orders = [_po()]
+    h = _FakeHandle({0: ((0, float("nan"), float("nan"), float("nan")), 0)})
+    bk = B.settled_book(h, R())
+    assert bk["x|EXIT||1"].level_resolved is False and bk["x|EXIT||1"].stop is None
 
 def test_settled_book_from_engine(test_so, test_feed, tmp_path):
     spec = corpus_spec(); h = make_handle(test_so, spec); j, _ = open_journal(tmp_path); j.append_epoch(spec.epoch_hash(), "{}")
@@ -110,6 +155,12 @@ def test_settled_book_from_engine(test_so, test_feed, tmp_path):
     # needed).
     assert "created_bar" in s.pending_orders[0] and "created_seq" in s.pending_orders[0]
     assert "created_position_cycle_seq" in s.pending_orders[0]
+    # L7 (Task 5 review finding 7): pin the four mirror field names
+    # `settled_book` now reads strictly (po[...], not po.get(...)) -- a
+    # mirror rename must fail this test loudly, not silently mirror a
+    # half-position close as closePosition=true.
+    for field in ("qty", "qty_percent", "requested_partial", "full_percent_exit_request"):
+        assert field in s.pending_orders[0]
     bk = B.settled_book(h, s)
     assert len(bk) == len(s.pending_orders) >= 1
     for k, it in bk.items():

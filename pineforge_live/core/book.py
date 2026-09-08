@@ -44,13 +44,17 @@ class Intent:
     `qty`/`qty_percent` are the mirror's raw fields (`None` when the
     order carries no fixed qty, e.g. a `strategy.exit` leg sized to
     "close the position"); `requested_partial` is the mirror's own
-    "caller passed qty_percent < 100" flag (spec §5.1) -- see
-    `mirrorable` for how these three keep partial-exit/pyramided legs out
-    of the v1 venue mirror.
+    "caller passed qty_percent < 100" flag (spec §5.1); `full_percent_exit_request`
+    is the mirror's own "the original exit call was a default/full-percent
+    request, before reservation normalization" flag (engine.hpp) -- see
+    `mirrorable` for how the qty/qty_percent/requested_partial trio keeps
+    partial-exit/pyramided legs out of the v1 venue mirror
+    (`full_percent_exit_request` is carried for a later consumer; v1 does
+    not read it).
     """
     key: IntentKey; index: int; is_long: bool; kind: str; from_entry: str
     stop: float | None; limit: float | None; activation: float | None; level_resolved: bool; created_bar: int
-    qty: float | None; qty_percent: float | None; requested_partial: bool; content_hash: str
+    qty: float | None; qty_percent: float | None; requested_partial: bool; full_percent_exit_request: bool; content_hash: str
     @property
     def is_entry(self) -> bool: return self.kind == "ENTRY"
     @property
@@ -78,34 +82,22 @@ def settled_book(handle, result) -> dict[str, Intent]:
     the position opens and `result.cycle_seq` moves on, or it reads as a
     fresh order (`RESTING`) instead of the same one continuing to rest.
 
-    MUST be called with the SAME `handle` that produced `result` (i.e.
-    right after the `run_full()`/`Ledger.seed`/`Ledger.settle` call that
-    returned `result`, before any subsequent `run_full`) -- `level_resolved`
-    and `effective_levels` are accessors on the handle's LAST run (see
-    `EngineHandle`'s class docstring); a later run replaces the live
-    strategy and these accessors would silently read the WRONG run.
-
-    A stale handle (`effective_levels` rc != 0, or `level_resolved` < 0,
-    on an index taken from `result`'s OWN mirror) degrades that one
-    Intent to "unresolved, no price" -- the SAME shape as an ordinary
-    not-yet-resolved order (rc==0, `level_resolved`==0) -- rather than
-    fabricating a stop/limit from the mirror row's raw (possibly stale)
-    `stop_price`/`limit_price`, which is what pre-review code did and
-    Task 3 review finding 2 correctly flagged as misleading. Finding 2's
-    literal suggested fix was a hard `RuntimeError` here; that was tried
-    and reverted -- it broke `Probe.evaluate()` (Task 4), which recaptures
-    `settled_book(self.h, self.L.last)` at the top of EVERY evaluate()
-    call, including calls after the handle has since run one or more
-    probe recomputes on top of `result`'s run. Verified live: after a
-    single `Probe.evaluate()`, a previously-valid mirror index reads
-    `effective_levels` rc=-1 / `level_resolved`=-1 (the probe's recompute
-    has a different-sized mirror) -- this is the STEADY STATE for a probe
-    issuing multiple evaluate() calls per bar, not a rare contract
-    violation, so raising here would make `Probe.evaluate()` fail on
-    essentially every call past the first. This function still keys
-    every row (so keys/count in the returned book always match
-    `result.pending_orders`, regardless of accessor staleness); only the
-    stale row's own price fields lose fidelity.
+    Contract: MUST be called with the SAME `handle` that produced `result`
+    -- immediately after the `run_full()` call that produced it (see
+    `Ledger._settled_book`/`SettleResult.book`, and `Probe.evaluate`'s M2
+    capture), before any subsequent `run_full` on that handle. `level_resolved`
+    and `effective_levels` are accessors on the handle's LAST run only (see
+    `EngineHandle`'s class docstring); calling this outside that window
+    reads the WRONG run's mirror. A stale read (`effective_levels` rc != 0,
+    or `level_resolved` < 0, for a row taken from `result`'s OWN mirror)
+    raises `RuntimeError` -- a caller hitting this has broken the contract
+    above, not encountered a normal unresolved order (that's rc==0,
+    `level_resolved`==0, handled below). This does NOT catch every
+    contract violation (a same-size mirror from a LATER run can still read
+    a plausible but wrong level under rc==0 -- see `SettleResult.book`'s
+    docstring for why only settle-time capture is safe), but it turns the
+    detectable half of it into a loud failure instead of a silently
+    fabricated price.
     """
     out: dict[str, Intent] = {}
     for po in result.pending_orders:
@@ -113,15 +105,18 @@ def settled_book(handle, result) -> dict[str, Intent]:
         rc, stop, limit, act = handle.effective_levels(i)
         lr = handle.level_resolved(i)
         if rc != 0 or lr < 0:
-            stop = limit = act = None; resolved = False
-        else:
-            stop, limit, act = _num(stop), _num(limit), _num(act)
-            resolved = lr == 1
+            raise RuntimeError(f"settled_book: stale handle read for {key.s!r} (mirror index {i}): "
+                               f"effective_levels rc={rc}, level_resolved={lr} -- settled_book() must be called "
+                               "immediately after the run_full() that produced `result`, before any later run_full()")
+        stop, limit, act = _num(stop), _num(limit), _num(act)
+        resolved = lr == 1
         created_bar = int(po["created_bar"])
-        qty, qty_percent = _num(po.get("qty")), _num(po.get("qty_percent"))
-        partial = bool(po.get("requested_partial", 0))
+        qty, qty_percent = _num(po["qty"]), _num(po["qty_percent"])
+        partial = bool(po["requested_partial"])
+        full_percent_exit_request = bool(po["full_percent_exit_request"])
         out[key.s] = Intent(key, i, bool(po["is_long"]), key.kind, key.from_entry, stop, limit, act, resolved, created_bar,
-                            qty, qty_percent, partial, content_hash(stop, limit, act, bool(po["is_long"]), qty))
+                            qty, qty_percent, partial, full_percent_exit_request,
+                            content_hash(stop, limit, act, bool(po["is_long"]), qty))
     return out
 
 def book_diff(prev: dict[str, Intent], cur: dict[str, Intent]) -> dict[str, IntentState]:
@@ -166,7 +161,7 @@ def dual_entry_guard(book: dict[str, Intent], position_size: float) -> bool:
         return any(it.is_long == want_long and (it.stop is not None or it.limit is not None) for it in entries)
     return False
 
-def mirrorable(it: Intent, position_size: float) -> bool:
+def mirrorable(it: Intent, position_size: float, eps: float = 1e-9) -> bool:
     """Whether `it` should be placed on the venue as a whole-position
     mirror order (spec §5.1: "EXIT kind, level_resolved, not a
     partial-exit bracket").
@@ -174,14 +169,21 @@ def mirrorable(it: Intent, position_size: float) -> bool:
     "not a partial-exit bracket" is read from the mirror's own signal
     rather than derived: `it.requested_partial` (the mirror's "caller
     passed qty_percent < 100" flag) directly rules a leg out, and so does
-    a fixed `it.qty` smaller than the held position (`abs(it.qty) <
-    abs(position_size)`, `position_size == 0.0` treated as "no exclusion
-    possible" since there is nothing to compare a resting exit's qty
-    against yet) -- both catch the qty_percent-partial and pyramided-leg
-    cases the interface spec calls out (e.g. a `HALF_TP` leg at
-    `qty_percent=50` closing 1 of 2 held lots would otherwise read
-    `mirrorable=True` and go to the venue as a `closePosition=true`
-    order that closes the WHOLE position).
+    a fixed `it.qty` smaller than the held position by more than `eps`
+    (`abs(it.qty) < abs(position_size) - eps`, `position_size == 0.0`
+    treated as "no exclusion possible" since there is nothing to compare
+    a resting exit's qty against yet) -- both catch the qty_percent-partial
+    and pyramided-leg cases the interface spec calls out (e.g. a `HALF_TP`
+    leg at `qty_percent=50` closing 1 of 2 held lots would otherwise read
+    `mirrorable=True` and go to the venue as a `closePosition=true` order
+    that closes the WHOLE position).
+
+    `eps` is a dead-band tolerance (default 1e-9), not a comparison
+    epsilon picked here -- a live caller (LiveCore) is expected to pass
+    its own configured dead-band (spec's `DeadBand`), so a fp-summed
+    pyramided position (e.g. `0.1+0.1+0.1 == 0.30000000000000004`) with a
+    whole-position leg at `qty=0.3` doesn't misread as "qty < position"
+    and get wrongly excluded, leaving the position unprotected.
 
     Otherwise unchanged from the v1 approximation: not an entry,
     resolved, has a stop or limit price -- MARKET intents are excluded in
@@ -194,6 +196,6 @@ def mirrorable(it: Intent, position_size: float) -> bool:
         return False
     if it.requested_partial:
         return False
-    if position_size != 0.0 and it.qty is not None and abs(it.qty) < abs(position_size):
+    if position_size != 0.0 and it.qty is not None and abs(it.qty) < abs(position_size) - eps:
         return False
     return True

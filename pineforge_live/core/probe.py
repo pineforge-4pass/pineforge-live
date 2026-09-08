@@ -231,10 +231,21 @@ class Probe:
         # self.L.bars is itself a fresh list only when the ledger settles
         # (once per bar), not once per tick.
         bars = self.L.bars + [forming]
-        # settled_book reads the handle's live strategy, so this MUST be
-        # captured before any probe run_full() below (the ledger's own run
-        # was the handle's last run up to this point).
-        book: dict[str, Intent] = settled_book(self.h, self.L.last)
+        # Use the book captured AT SETTLE TIME (SettleResult.book, ledger
+        # fix-2 / the Task 6 prelim ruling) instead of re-reading
+        # settled_book(self.h, self.L.last) here: the handle's
+        # effective_levels/level_resolved accessors describe only its LAST
+        # run (see settled_book's own docstring), and by the time a SECOND
+        # evaluate() call on the same bar reaches this line, self.h's last
+        # run is already a PRIOR evaluate() call's own probe run, not the
+        # settlement that produced self.L.last -- a re-read here would
+        # silently resolve stale/wrong-run levels (confirmed live on the
+        # bracket fixture's bar 2005: a previously-valid mirror index reads
+        # a DIFFERENT order's real stop/limit after just one probe run).
+        # self.L.last.book was captured by Ledger._settled_book immediately
+        # after the settlement's own run_full(), so it stays correct no
+        # matter how many probe runs have happened on the handle since.
+        book: dict[str, Intent] = self.L.last.book
         resting_ids = {it.key.order_id for it in book.values()}
         guard = dual_entry_guard(book, self.L.last.position_size)
 

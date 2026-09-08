@@ -80,7 +80,13 @@ def test_probe_fills_subset_of_settlement_over_50_bars(env, request):
             probe_fills_this_bar |= {(f.intent, f.leg) for f in r.fills}
             entry_probe_fills += sum(1 for f in r.fills if f.leg == "ENTRY")
             retracts += len(r.retracted)
-        book_before = settled_book(h, L.last)   # the pre-bar book, same input the probe resolved against
+        # The pre-bar book, same input the probe resolved against -- read
+        # from L.last.book (captured at settle time), NOT a fresh
+        # settled_book(h, L.last) call: the handle's last run by this point
+        # is one of THIS bar's own probe evaluate() calls above, not the
+        # settlement that produced L.last, so a re-read here would now
+        # raise (settled_book's restored strict contract, Task 6 prelim).
+        book_before = L.last.book
         s = L.settle(bar, now_ms=bar.ts_open + 900_000)
         settled = {(k.entry_id, "ENTRY") for k in s.new_opened} | {(k.exit_id, "EXIT") for k in s.new_closed}
         settled |= {(_resolve_entry_fill_intent(ef, book_before), ef["leg"]) for ef in s.entry_fills}
@@ -123,17 +129,18 @@ def test_book_captured_before_probe_run(test_so_bracket, test_feed, tmp_path):
     At bar 2005 this test independently reproduces the review's own
     verification method: a wrong-order `settled_book` read (called AFTER
     evaluate()'s probe run(s), through the handle's by-then-stale live
-    strategy) must diverge from the correct pre-probe Intent objects --
-    verified empirically to manifest as the STOP/LIMIT VALUES THEMSELVES
-    reading wrong (the fill at 2005 changes the mirror's index assignment,
-    so a stale index reads a different order's levels entirely -- a more
-    severe case of the same hazard than a bare `level_resolved` flip), not
-    merely `level_resolved`, so the assertion checks full Intent
-    inequality rather than pinning one specific field. `r.levels`/
-    `r2.levels` (evaluate()'s own internal book, captured the RIGHT way)
+    strategy) must fail loudly (Task 6 prelim: L5 restores the strict
+    `RuntimeError`, since `book` is now only ever built inside the
+    settle/seed accessor window) rather than silently returning a
+    plausible-but-wrong Intent -- verified empirically (pre-fix) to
+    manifest as the STOP/LIMIT VALUES THEMSELVES reading wrong (the fill
+    at 2005 changes the mirror's index assignment, so a stale index reads
+    a different order's levels entirely), not merely `level_resolved`.
+    `r.levels`/`r2.levels`/`r3.levels` (evaluate()'s own internal book,
+    now sourced from `self.L.last.book` -- captured once, at settle time,
+    and therefore IDENTICAL across every evaluate() call on the same bar)
     must still match the pre-probe book exactly, on both fixtures'
-    (stop, limit, activation) AND (independently, via direct `Intent`
-    comparison below) `level_resolved`."""
+    (stop, limit, activation)."""
     spec = corpus_spec_bracket(); h = make_handle(test_so_bracket, spec); j, _ = open_journal(tmp_path)
     j.append_epoch(spec.epoch_hash(), "{}")
     bars = load_bars(test_feed, 2010)
@@ -145,41 +152,24 @@ def test_book_captured_before_probe_run(test_so_bracket, test_feed, tmp_path):
     r = P.evaluate(forming, now_ms=forming.ts_open)  # runs P_auto (and P_other if it fills anything)
     _assert_matches_pre_probe_book(r.levels, pre_probe_book)
 
-    # Discriminating check (finding 5): the wrong-order read (through the
-    # handle's now-stale live strategy, left over from the probe run(s)
-    # above) must actually diverge from the correct pre-probe book on full
-    # Intent equality (level_resolved included) -- if it doesn't, this bar
-    # has stopped exercising the hazard and the pin is vacuous again.
-    wrong_order_book = settled_book(h, L.last)
-    assert wrong_order_book.keys() == pre_probe_book.keys()
-    assert wrong_order_book != pre_probe_book, "fixture/bar no longer exercises the book-staleness hazard"
+    # Discriminating check (finding 5, now L5's restored raise): a
+    # wrong-order read (through the handle's now-stale live strategy, left
+    # over from the probe run(s) above) must raise RuntimeError -- if it
+    # doesn't, this bar has stopped exercising the hazard and the pin is
+    # vacuous again.
+    with pytest.raises(RuntimeError):
+        settled_book(h, L.last)
 
-    # NOTE (concern, not a finding this fix wave covers): a second
+    # Fixed by this prelim (previously a documented concern): a SECOND
     # evaluate() call on this SAME forming bar (2005, where P_auto's run
     # just filled the entry and restructured the mirror's pending-order
-    # set) does NOT reproduce pre_probe_book -- settled_book(self.h,
-    # self.L.last) is recomputed fresh at the top of every evaluate() call,
-    # but by the second call self.h's LAST run is already the first call's
-    # own probe run, not the settlement that produced self.L.last, so the
-    # indices it reads are for a DIFFERENT (probe) run's mirror. This is
-    # exactly the steady-state staleness book.py's own docstring documents
-    # ("after a single Probe.evaluate(), a previously-valid mirror index
-    # reads ... unresolved ... this is the STEADY STATE for a probe issuing
-    # multiple evaluate() calls per bar") -- degrading gracefully to
-    # None/unresolved on the sma fixture (never observably wrong there,
-    # which is exactly why the ORIGINAL version of this test, and its
-    # "second evaluate() must still agree" claim, never caught it) but, on
-    # THIS fixture/bar (a real fill restructuring the order count),
-    # observably reading a DIFFERENT order's real stop/limit values under
-    # the stale index -- not merely degrading to None. Confirmed this is
-    # about the fill, not "any second call": bar 2006 below (no fill) DOES
-    # keep agreeing across repeated evaluate() calls. Flagged in the fix
-    # report as a pre-existing concern (present before and after this fix
-    # wave, on both HEAD~1 and HEAD) rather than fixed here -- it is not
-    # one of M1-M3/m4-m5/n7-n10/created_now, and a fix belongs with
-    # `SettleResult.book` (ledger.py's own in-flight capture-once-after-
-    # the-producing-run field), out of this fix wave's probe.py/
-    # tests/test_probe.py-only scope.
+    # set) must STILL reproduce pre_probe_book -- Probe.evaluate() now
+    # reads `self.L.last.book` (captured once, at settle time) instead of
+    # recomputing settled_book(self.h, self.L.last) at the top of every
+    # call, so it no longer matters how many probe runs have since
+    # replaced the handle's live strategy.
+    r2 = P.evaluate(forming, now_ms=forming.ts_open + 1)
+    _assert_matches_pre_probe_book(r2.levels, pre_probe_book)
 
     # Now settle bar 2005 for real (the position opens) and re-pin at bar
     # 2006, where the ATR bracket's own stop/target leg is resting with
