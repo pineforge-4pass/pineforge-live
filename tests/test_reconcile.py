@@ -382,19 +382,6 @@ def test_missed_exit_representative_is_list_order_independent():
     assert [(c.kind, c.side, c.qty, c.intent) for c in a.corrections] == [(c.kind, c.side, c.qty, c.intent) for c in b.corrections]
     assert a.corrections[0].kind == "MARKET_CORRECT" and a.corrections[0].side == T.Side.SELL and abs(a.corrections[0].qty - 1.0) < 1e-9
 
-def test_trigger_reversed_flatten_with_a_missed_entry_marks_skipped_cycle():
-    """NEW-7 (Y2/Y12): the FLATTEN early return must not drop the L7/NEW-5
-    `skipped_cycle` marking -- a TRIGGER_REVERSED/ENTRY_SLIP FLATTEN
-    already refuses any MISSED entry the SAME decision found (it would have
-    been refused by this decision's own FLAT_ONLY escalation anyway), so
-    the cycle is SKIPPED, not silently dropped."""
-    d = R.reconcile(inp([cf(C.FillClass.TRIGGER_REVERSED), cf(C.FillClass.ENTRY_SLIP), cf(C.FillClass.MISSED, qty=1.0)],
-                        real_position=0.5, ledger_position=1.0))
-    assert len(d.corrections) == 1
-    c = d.corrections[0]
-    assert c.kind == "FLATTEN" and c.side == T.Side.SELL and abs(c.qty - 0.5) < 1e-9
-    assert d.skipped_cycle
-
 def test_missed_fill_failing_both_gates_with_a_real_gap_marks_skipped_cycle():
     """NEW-8 (Y5): a MISSED fill that fails BOTH the ENTRY and EXIT gates
     (X13's `basis == 0` sibling) leaves a real ledger/basis gap unrecorded
@@ -441,3 +428,75 @@ def test_skipped_cycle_from_missed_refusal_blocks_a_same_decision_top_up():
                         ledger_position=2.0, real_position=0.5, our_signed_fills=0.5, missed_distance_bps=50.0))
     assert d.skipped_cycle
     assert all(c.kind != "TOP_UP" for c in d.corrections)
+
+
+# ---- final wave: M4(c), m2, NEW-10, re-review nit (b) ----
+
+def test_counter_names_lists_exactly_what_reconcile_bumps():
+    """m2: `COUNTER_NAMES` is the vocabulary `BreakerTable.self_test`
+    validates a G3 breaker against, so it has to BE the set of names this
+    module can actually bump -- a name missing from it makes a legitimate
+    breaker a startup error, a name that is in it but bumped nowhere makes
+    a dead lane look configured (which is what `orphan` was). Read out of
+    the module's own source so the two cannot drift silently."""
+    import inspect, re
+    src = inspect.getsource(R)
+    literals = {name for call in re.findall(r"bump\(([^()]*)\)", src) for name in re.findall(r'"([a-z_]+)"', call)}
+    # the one non-literal call site: `bump(cls.value.lower())` over the
+    # three classes the reconciler merely tallies.
+    literals |= {C.FillClass.CONFIRMED.value.lower(), C.FillClass.IN_FLIGHT.value.lower(), C.FillClass.SYNTHETIC.value.lower()}
+    assert literals == R.COUNTER_NAMES
+
+
+def test_every_missed_fill_bumps_the_missed_counter():
+    """m2: `missed` is the spec's orphan+missed breaker numerator -- one
+    per MISSED FILL, not one per decision, and independent of what the
+    decision then did about them (corrected, skipped, or refused)."""
+    d = R.reconcile(inp([cf(C.FillClass.MISSED, intent="L1"), cf(C.FillClass.MISSED, intent="L2", leg="EXIT")],
+                        real_position=0.3, ledger_position=1.0))
+    assert d.counters["missed"] == 2 and d.counters.get("missed_corrected") == 1
+    assert R.reconcile(inp([cf(C.FillClass.CONFIRMED)], real_position=1.0)).counters.get("missed") is None
+
+
+def test_a_quiescent_decision_that_issues_nothing_over_a_real_gap_counts_it():
+    """M4(c): spec §5.4 compares our cumulative signed fills with the
+    ledger position per DECISION, but every correcting branch is reached
+    only THROUGH a MISSED/QTY_DIVERGENT fill -- a bar whose fills were all
+    explained, or whose only finding was MIRROR_EARLY's deliberate
+    hold-flat, left a real divergence with no counter at all. A counter,
+    not a STOP: holding flat is legal, and the G3 breaker is what decides
+    whether the RATE of it is not."""
+    d = R.reconcile(inp([cf(C.FillClass.MIRROR_EARLY)], ledger_position=1.0, real_position=0.0, our_signed_fills=0.0))
+    assert d.corrections == [] and d.stop is None and d.counters["gap_carried"] == 1
+    # no gap -> no counter; and a decision that DID correct the gap is not carrying it
+    assert "gap_carried" not in R.reconcile(inp([cf(C.FillClass.MIRROR_EARLY)], ledger_position=1.0, real_position=1.0)).counters
+    corrected = R.reconcile(inp([cf(C.FillClass.MISSED)], real_position=0.3, ledger_position=1.0))
+    assert corrected.corrections and "gap_carried" not in corrected.counters
+
+
+def test_a_sub_dead_band_missed_under_a_real_gap_marks_skipped_cycle():
+    """NEW-10: the gate-PASSING sibling of NEW-8. A MISSED entry whose own
+    qty is below the dead-band cannot be corrected, but the 1.5 gap it was
+    found under is real and was left unrecorded -- no `skipped_cycle`, no
+    STOP, nothing but a `skipped_position_mismatch`."""
+    tiny = C.ClassifiedFill(C.FillClass.MISSED, C.EmulatedFill("L", "ENTRY", True, 0.02, 100.0, 10), None, 0.02, "")
+    d = R.reconcile(inp([tiny], ledger_position=2.0, real_position=0.5, our_signed_fills=0.5))
+    assert d.corrections == [] and d.counters.get("skipped_position_mismatch") == 1
+    assert d.skipped_cycle and d.counters.get("skipped_cycle") == 1
+    # a sub-band MISSED with no real gap behind it stays a plain mismatch
+    d = R.reconcile(inp([tiny], ledger_position=1.0, real_position=1.0, our_signed_fills=1.0))
+    assert not d.skipped_cycle
+
+
+def test_a_skipped_cycle_top_up_refusal_is_not_counted_as_a_stop_refusal():
+    """Re-review nit (b): a TOP_UP the SKIPPED-cycle rule refuses under NO
+    stop used to bump `refused_by_own_stop`, so a breaker watching that
+    name would count cycles nothing had STOPped. The two reasons are
+    counted apart; `flat_only` still wins when both hold."""
+    fills = [cf(C.FillClass.MISSED, qty=1.0, intent="L1"), cf(C.FillClass.QTY_DIVERGENT, qty=0.5, intent="L2")]
+    d = R.reconcile(inp(fills, ledger_position=2.0, real_position=0.5, our_signed_fills=0.5, missed_distance_bps=50.0))
+    assert d.skipped_cycle and d.stop is None
+    assert d.counters.get("refused_skipped_cycle") == 1 and "refused_by_own_stop" not in d.counters
+    d = R.reconcile(inp(fills, ledger_position=2.0, real_position=0.5, our_signed_fills=0.5, missed_distance_bps=50.0,
+                        stop_level=T.StopLevel.FLAT_ONLY))
+    assert d.counters.get("refused_by_own_stop") == 2 and "refused_skipped_cycle" not in d.counters

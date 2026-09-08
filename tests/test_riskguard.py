@@ -300,3 +300,19 @@ def test_rate_window_rejects_a_window_smaller_than_one():
     with pytest.raises(ValueError):
         RG.RateWindow(-1)
     assert RG.RateWindow(1).n == 0                   # 1 is the smallest window that can observe anything
+
+
+def test_breaker_table_self_test_rejects_a_breaker_that_watches_no_counter():
+    """m2: a G3 breaker's `name` IS the reconciler counter it watches, so
+    one naming something nothing bumps observes False forever -- no
+    breach, no alert, no error: a lane that looks configured and is
+    silently absent (exactly what `orphan` was in the suite and the
+    harness). `self_test` is handed `reconcile.COUNTER_NAMES` by
+    `LiveCore` and refuses it at construction, like every other
+    can-never-fire config. Passed no vocabulary, the check is skipped."""
+    from pineforge_live.core.reconcile import COUNTER_NAMES
+    t = RG.BreakerTable([RG.Breaker("orphan", 0.01, 500, RG.n_min_for(0.01), 5)])
+    t.self_test()                       # no vocabulary given -- rate machinery only
+    with pytest.raises(RuntimeError, match="watch no known counter"):
+        t.self_test(COUNTER_NAMES)
+    RG.BreakerTable([RG.Breaker("missed", 0.01, 500, RG.n_min_for(0.01), 5)]).self_test(COUNTER_NAMES)

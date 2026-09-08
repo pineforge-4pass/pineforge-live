@@ -90,7 +90,12 @@ LIMITS = RiskLimits(max_abs_position=1e6, max_notional=1e12, max_order_notional=
                     disagree_twice=2, unexplained_divergence_pct=2.0,
                     liquidation_distance_pct_min=1.0, recompute_ms_p99_max=5_000)
 DEAD_BAND = DeadBand(0.001, 0.001, 5.0)
-BREAKERS = [Breaker("orphan", 0.01, 500, n_min_for(0.01), 5)]
+#: m2: a breaker's name IS the reconciler counter it watches, and
+#: `BreakerTable.self_test` now refuses one that names anything outside
+#: `reconcile.COUNTER_NAMES`. `missed` is the spec's orphan+missed
+#: numerator (theta = 1%); on a clean tape it never fires, which is the
+#: point -- a run where it does is not a clean cadence.
+BREAKERS = [Breaker("missed", 0.01, 500, n_min_for(0.01), 5)]
 RUNTIME_CONFIG = RuntimeConfig(poll_interval_ms=30_000, drain_bound_ms=5_000, grace_ms=3_000,
                               open_wait_ms=2_000, risk_limits={})
 #: A cancel carries no qty and produces no fill; every other action kind does.

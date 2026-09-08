@@ -15,11 +15,12 @@ from tests.helpers import load_bars, make_handle, corpus_spec
 
 LIMITS = RiskLimits(1e6, 1e12, 1e9, 8, 32, 1e9, 50, 60_000, 60_000, 3, 2, 2.0, 1.0, 5_000)
 
-def _core(test_so, tmp_path, limits=LIMITS):
+def _core(test_so, tmp_path, limits=LIMITS, breakers=None):
     spec = corpus_spec(); h = make_handle(test_so, spec)
     m = StopMarker(tmp_path / "j.stop"); m.prepare(); j = Journal.open(tmp_path / "j.sqlite3", stop_marker=m)
     rc = RuntimeConfig(poll_interval_ms=30_000, drain_bound_ms=5_000, grace_ms=3_000, open_wait_ms=2_000, risk_limits={})
-    c = LiveCore(h, spec, j, m, rc, limits, DeadBand(0.001, 0.001, 5.0), [Breaker("orphan", 0.01, 500, n_min_for(0.01), 5)])
+    c = LiveCore(h, spec, j, m, rc, limits, DeadBand(0.001, 0.001, 5.0),
+                 breakers if breakers is not None else [Breaker("missed", 0.01, 500, n_min_for(0.01), 5)])
     return c, j
 
 @pytest.fixture
@@ -507,3 +508,33 @@ def test_the_stop_controllers_hold_bound_comes_from_risk_limits(test_so, tmp_pat
     c.stop.raise_stop(T.StopLevel.HARD, T.StopDisposition.HOLD, "test")
     assert not c.stop.hold_expired(c.stop.raised_ms + 59_999)
     assert c.stop.hold_expired(c.stop.raised_ms + 60_000)
+
+
+# --- final wave: m2 end to end -------------------------------------------------
+
+def test_a_g3_breaker_alerts_then_breaches_on_the_missed_counter(test_so, test_feed, tmp_path):
+    """m2, end to end: the whole `g3_alert` / `g3_breached` path had zero
+    coverage because the only breaker ever configured (`orphan`) named a
+    counter nothing bumps. With the breaker watching `missed`, bar 2001's
+    reversal (the ledger fills, the empty venue does not) samples True:
+    below `n_min` that is an `alert` incident, and once the window reaches
+    `n_min` the breach escalates `STOP(FLAT_ONLY, "g3:missed")`.
+
+    theta 0.5 / n_min 4 is the smallest window `self_test` accepts
+    (`UB_95(0, 4) < 0.5`) and `x_max = 0` makes one sample decisive; the
+    corpus cadence itself is far cleaner than that -- the harness runs its
+    `missed` breaker at the spec's own 1%. The basis is held at 0 so bar
+    2001's MISSED entry is correctable and the reconciler raises no STOP
+    of its own to confound the G3 one."""
+    c, j = _core(test_so, tmp_path, breakers=[Breaker("missed", 0.5, 4, 4, 0)])
+    bars = load_bars(test_feed, 2300)
+    c.seed(bars[:2000])
+    seen = []
+    for i in range(2000, 2004):
+        out = c.settle(bars[i], [], set(), set(), 0.0, 0, our_signed_fills=0.0)
+        seen.append(([x["kind"] for x in out.incidents], out.stop))
+    assert [k for k, _ in seen] == [[], ["g3_alert"], ["g3_alert"], ["g3_breached"]], seen
+    assert seen[1][1] is None and seen[2][1] is None                     # an alert is not a STOP
+    assert seen[3][1] == (T.StopLevel.FLAT_ONLY, T.StopDisposition.NONE, "g3:missed")
+    assert c.stop.level == T.StopLevel.FLAT_ONLY and c.stop.cause == "g3:missed"
+    assert [r for r in j.rows("incidents", "kind=?", ("g3_breached",))]

@@ -29,7 +29,22 @@ class Breaker:
 class BreakerTable:
     def __init__(self, breakers: list[Breaker]):
         self.breakers = list(breakers)
-    def self_test(self) -> None:
+    def self_test(self, known_names: frozenset[str] | None = None) -> None:
+        """Refuses, at construction, any breaker that could never fire.
+
+        `known_names` (m2) is the vocabulary of counters a sample can come
+        from -- `reconcile.COUNTER_NAMES` for the live wiring, where a
+        breaker's `name` IS the reconciler counter it watches. A breaker
+        naming something nothing bumps observes `False` forever: no
+        breach, no alert, and no error either, so a G3 lane that looks
+        configured is silently absent (which is exactly what the suite and
+        the harness had, both watching a counter called `orphan`). Passed
+        `None` the check is skipped -- for a caller testing the rate
+        machinery itself, with no counter vocabulary in play."""
+        if known_names is not None:
+            unknown = sorted({b.name for b in self.breakers} - known_names)
+            if unknown:
+                raise RuntimeError(f"G3 self-test failed: breaker(s) watch no known counter: {unknown}")
         bad_ub = [b.name for b in self.breakers if ub95(0, b.n_min) >= b.theta]
         if bad_ub:
             raise RuntimeError(f"G3 self-test failed: UB_95(0, n_min) >= theta for {bad_ub}")
@@ -81,8 +96,7 @@ class RiskLimits:
     but unwired -- they need venue/account inputs B3 wires into
     RateWindows/limits (plan §Spec coverage: "feed/eval staleness,
     bar-mismatch streak, unexplained-divergence and liquidation-distance
-    breakers need venue/account inputs"). `dead_band` (on `RiskGuard`, not
-    here) is likewise B3.
+    breakers need venue/account inputs").
     """
     max_abs_position: float; max_notional: float; max_order_notional: float; max_fill_actions_per_bar: int; max_book_ops_per_bar: int
     max_daily_realized_loss: float; max_daily_reconciles: int; stale_feed_ms: int; stale_eval_ms: int; bar_mismatch_streak: int
@@ -260,8 +274,8 @@ class StopController:
         return reduce_only and action_kind in _HARD_ALLOWED_REDUCE_ONLY
 
 class RiskGuard:
-    def __init__(self, limits: RiskLimits, dead_band=None):
-        self.limits, self.dead_band = limits, dead_band; self._fills = 0; self._book_ops = 0
+    def __init__(self, limits: RiskLimits):
+        self.limits = limits; self._fills = 0; self._book_ops = 0
     def check_position(self, new_abs_position: float, price: float) -> str | None:
         new_abs_position = abs(new_abs_position)  # n7: "abs" in the name is not a guarantee -- trust the value, not the caller
         if new_abs_position > self.limits.max_abs_position: return "max_abs_position"

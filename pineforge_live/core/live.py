@@ -26,7 +26,7 @@ from .book import Intent, IntentState, book_diff
 from .classify import ClassifiedFill, FillClass, VenueFill, _side_for_leg, classify_bar, emulated_from_settle
 from .ledger import BarsDivergence, Ledger, LedgerDivergence, RecomputeAborted, SettleResult
 from .probe import Probe, ProbeResult
-from .reconcile import DeadBand, ReconcileConfig, ReconcileDecision, ReconcileInput, reconcile
+from .reconcile import COUNTER_NAMES, DeadBand, ReconcileConfig, ReconcileDecision, ReconcileInput, reconcile
 from .riskguard import Breaker, BreakerTable, RateWindow, RiskGuard, RiskLimits, RiskViolation, StopController
 
 DAY_MS = 86_400_000
@@ -129,15 +129,18 @@ class LiveCore:
         self.ledger = Ledger(handle, spec, journal, runtime_config.hash())
         self.probe = Probe(handle, spec, self.ledger, trail_refresh_policy)
         self.limits, self.dead_band = limits, dead_band
-        self.guard = RiskGuard(limits, dead_band)
+        self.guard = RiskGuard(limits)
         self.stop = StopController(journal, marker, limits.hard_stop_max_hold_ms)
         self.stop.restore()
         # G3 (spec §1): self-tested at construction so a breaker that could
         # never fire (UB_95(0, n_min) >= theta, or window_n < n_min) is a
         # startup error, not a silent no-op. Each breaker owns a RateWindow
         # keyed by its own name; `settle()` observes one sample per bar --
-        # "did the reconciler's counter of that name fire this bar".
-        self.g3 = BreakerTable(breakers); self.g3.self_test()
+        # "did the reconciler's counter of that name fire this bar". m2:
+        # the self-test is handed the reconciler's own counter vocabulary,
+        # so a breaker watching a name nothing bumps is a startup error
+        # too rather than a lane that looks configured and never fires.
+        self.g3 = BreakerTable(breakers); self.g3.self_test(COUNTER_NAMES)
         self.g3_windows: dict[str, RateWindow] = {b.name: RateWindow(b.window_n) for b in breakers}
         self.rcfg = reconcile_cfg or ReconcileConfig(1, 30.0, limits.max_order_notional, 3, False)
         self.book: dict[str, Intent] = {}

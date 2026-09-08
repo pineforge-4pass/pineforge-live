@@ -9,6 +9,23 @@ from pineforge_live import types as T
 from .classify import ClassifiedFill, FillClass, EmulatedFill
 from .riskguard import stronger
 
+#: Every counter name `reconcile()` can `bump()` -- the reconciler's whole
+#: observability vocabulary, exported because a G3 `Breaker`'s `name` IS
+#: the counter it watches (`live.LiveCore._observe_breakers`) and a breaker
+#: naming something not in here can never fire. `BreakerTable.self_test`
+#: takes this set and refuses such a config at construction (m2), the same
+#: way it already refuses one whose window can never reach `n_min`: the
+#: only breaker the suite and the harness ever configured was `"orphan"`,
+#: a name nothing bumps, so the whole `g3_breached`/`g3_alert` path was
+#: dead. Keep in sync with the `bump(...)` call sites -- there is a test
+#: that reads them out of this module's own source and compares.
+COUNTER_NAMES: frozenset[str] = frozenset({
+    "account_mismatch", "confirmed", "gap_carried", "in_flight", "malformed", "mirror_early", "missed",
+    "missed_corrected", "path_divergent", "refused_budget", "refused_by_own_stop", "refused_skipped_cycle",
+    "residual_carried", "skipped_cycle", "skipped_not_quiescent", "skipped_position_mismatch", "synthetic",
+    "topped_up", "trimmed",
+})
+
 @dataclass(frozen=True)
 class DeadBand:
     """The residual/correction tolerance below which a position mismatch is
@@ -169,7 +186,15 @@ def _emit_missed_correction(inp: ReconcileInput, d: ReconcileDecision, bump, e: 
         d.skipped_cycle = True; bump("skipped_cycle"); return 0.0
     qty = min(e.qty, qty_cap)
     if qty <= band:
-        bump("skipped_position_mismatch"); return 0.0
+        # NEW-10: the gate-passing sibling of NEW-8 -- a MISSED fill whose
+        # OWN qty is sub-dead-band cannot be corrected, but if the gap it
+        # was found under is real (`qty_cap > band`) the cycle is still one
+        # we declined to act on and must be journaled SKIPPED rather than
+        # counted silently.
+        bump("skipped_position_mismatch")
+        if qty_cap > band:
+            d.skipped_cycle = True; bump("skipped_cycle")
+        return 0.0
     if increases and qty * inp.price > inp.cfg.budget_notional:
         d.skipped_cycle = True; bump("refused_budget"); return 0.0
     d.corrections.append(CorrectionRequest("MARKET_CORRECT", corr_side, qty, "MISSED", e.intent, reduce_only=not increases))
@@ -234,29 +259,35 @@ def _reconcile_missed(inp: ReconcileInput, d: ReconcileDecision, bump, missed_en
     if missed_entries or missed_exits:
         bump("skipped_position_mismatch")
         if abs(ledger - basis) > band:
-            d.skipped_cycle = True
+            d.skipped_cycle = True; bump("skipped_cycle")
     return 0.0
 
 def _emit_top_up(inp: ReconcileInput, d: ReconcileDecision, bump, e: EmulatedFill, *, signed: float,
-                 band: float, flat_only: bool) -> None:
+                 band: float, flat_only: bool, skipped: bool = False) -> None:
     """The exposure-increasing half of a QTY_DIVERGENT correction: move
-    the position by `signed` (`+` = BUY, `-` = SELL). Gated by `flat_only`
-    and budget-checked in `qty * price` terms exactly like a MISSED entry;
-    every refusal (and a sub-dead-band `signed`) carries `signed` into
-    `residual_qty` under that field's own sign convention (the signed
-    correction that was NOT issued)."""
+    the position by `signed` (`+` = BUY, `-` = SELL). Refused by the STOP
+    level (`flat_only`), by a cycle this same decision already marked
+    SKIPPED (`skipped`, NEW-9), and by the budget in `qty * price` terms
+    exactly like a MISSED entry; every refusal (and a sub-dead-band
+    `signed`) carries `signed` into `residual_qty` under that field's own
+    sign convention (the signed correction that was NOT issued).
+
+    The two refusals are counted apart (re-review nit b): a SKIPPED-cycle
+    refusal under NO stop used to bump `refused_by_own_stop`, so a breaker
+    watching that name would count cycles nothing had STOPped. `flat_only`
+    wins the attribution when both hold -- the stronger reason."""
     qty = abs(signed)
     if qty <= band:
         d.residual_qty += signed; bump("residual_carried"); return
-    if flat_only:
-        d.residual_qty += signed; bump("refused_by_own_stop"); return
+    if flat_only or skipped:
+        d.residual_qty += signed; bump("refused_by_own_stop" if flat_only else "refused_skipped_cycle"); return
     if qty * inp.price > inp.cfg.budget_notional:
         d.residual_qty += signed; bump("refused_budget"); return
     d.corrections.append(CorrectionRequest("TOP_UP", _side_for(signed), qty, "QTY_DIVERGENT", e.intent, reduce_only=False))
     bump("topped_up")
 
 def _reconcile_qty_divergent(inp: ReconcileInput, d: ReconcileDecision, bump, qty_divergent: list[ClassifiedFill],
-                             basis: float, band: float, flat_only: bool) -> None:
+                             basis: float, band: float, flat_only: bool, skipped: bool = False) -> None:
     """QTY_DIVERGENT correction (spec §5.4/§4.4): one trim and/or one
     budgeted top-up for the TOTAL position delta (M5), regardless of how
     many QTY_DIVERGENT fills were classified this decision -- every one of
@@ -299,12 +330,12 @@ def _reconcile_qty_divergent(inp: ReconcileInput, d: ReconcileDecision, bump, qt
             bump("trimmed")
         else:
             d.residual_qty += -basis; bump("residual_carried")
-        _emit_top_up(inp, d, bump, e, signed=ledger, band=band, flat_only=flat_only)
+        _emit_top_up(inp, d, bump, e, signed=ledger, band=band, flat_only=flat_only, skipped=skipped)
         return
     if delta * side > 0:
         d.corrections.append(CorrectionRequest("REDUCE_ONLY_TRIM", _side_for(-delta), abs(delta), "QTY_DIVERGENT", e.intent, reduce_only=True))
         bump("trimmed"); return
-    _emit_top_up(inp, d, bump, e, signed=-delta, band=band, flat_only=flat_only)
+    _emit_top_up(inp, d, bump, e, signed=-delta, band=band, flat_only=flat_only, skipped=skipped)
 
 def reconcile(inp: ReconcileInput) -> ReconcileDecision:
     """spec §5.4: turn one bar's classified fills into corrections plus a
@@ -369,6 +400,10 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
         if cls == FillClass.MISSED:
             if e is None:
                 bump("malformed"); continue
+            # m2: the spec's orphan+missed breaker numerator -- one per
+            # MISSED FILL, unlike `missed_corrected`/`skipped_*`, which
+            # count what the DECISION did about all of them together.
+            bump("missed")
             (missed_entries if e.leg == "ENTRY" else missed_exits).append(c)
         elif cls == FillClass.QTY_DIVERGENT:
             if e is None:
@@ -448,12 +483,27 @@ def reconcile(inp: ReconcileInput) -> ReconcileDecision:
         # failed fall-through) issues no exposure-increasing correction
         # from the QTY_DIVERGENT pass either -- trims still ship
         # (reduce-only, ungated); budget/own-stop refusals are unchanged
-        # since the top-up would be refused for the same reason.
-        _reconcile_qty_divergent(inp, d, bump, qty_divergent, basis + issued, band, flat_only or d.skipped_cycle)
+        # since the top-up would be refused for the same reason. The two
+        # refusals are counted apart (nit b): `flat_only` is the STOP
+        # level, `skipped` this decision's own SKIPPED marking.
+        _reconcile_qty_divergent(inp, d, bump, qty_divergent, basis + issued, band, flat_only, skipped=d.skipped_cycle)
     elif missed_entries:
         # NEW-5: a MISSED entry dropped by the account cross-check is a
         # cycle we declined to act on -- say so, so Task 8 journals the
         # `cycle_skipped` row rather than leaving only the STOP as evidence.
         d.skipped_cycle = True; bump("skipped_cycle")
+
+    # ---- M4(c): a quiescent decision that ends with the ledger and our
+    # own fills apart by more than the dead-band and issued NOTHING is a
+    # carried gap. Spec §5.4 puts the ledger-vs-our-fills comparison at the
+    # decision level, but every branch above only reaches it THROUGH a
+    # MISSED/QTY_DIVERGENT fill, so a bar whose fills were all explained
+    # (or whose only finding was a deliberate hold-flat) left a real
+    # divergence with no counter at all. A counter, not a STOP:
+    # MIRROR_EARLY's "hold flat, retain the intent" is exactly this shape
+    # and is legal (spec §5.4), and the G3 breaker is what decides whether
+    # the RATE of it is not.
+    if not d.corrections and abs(inp.ledger_position - basis) > band:
+        bump("gap_carried")
 
     return d
