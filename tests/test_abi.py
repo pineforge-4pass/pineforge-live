@@ -52,6 +52,37 @@ def test_tail_flags_keep_prefix(test_so, test_feed):
     assert tail.broker_state_hash[:-1] == base.broker_state_hash[:-1]
     assert back.trades == base.trades and back.broker_state_hash == base.broker_state_hash
 
+def test_reuse_hazard_is_contained(test_so, test_feed):
+    """The reused-pf_strategy_t hazard (a compiled script's own indicator/series
+    state is not reset by the engine's reset_run_state()) must not leak through
+    the binding: two run_full() calls on ONE handle must equal one run_full()
+    call on each of two SEPARATE fresh handles."""
+    bars = load_bars(test_feed, 5000)
+    with EngineHandle(test_so) as h:
+        h.set_broker_state_hash_recording(True)
+        r1 = h.run_full(bars, "15")
+        r2 = h.run_full(bars, "15")
+    with EngineHandle(test_so) as h1:
+        h1.set_broker_state_hash_recording(True)
+        s1 = h1.run_full(bars, "15")
+    with EngineHandle(test_so) as h2:
+        h2.set_broker_state_hash_recording(True)
+        s2 = h2.run_full(bars, "15")
+    assert r1.trades == s1.trades and r1.broker_state_hash == s1.broker_state_hash
+    assert r2.trades == s2.trades and r2.broker_state_hash == s2.broker_state_hash
+
+def test_accessors_valid_after_run(test_so, test_feed):
+    """Pending-order / scalar accessors called after run_full() must read the
+    strategy that produced THAT run, not a stale or already-freed one."""
+    bars = load_bars(test_feed, 4000)
+    with EngineHandle(test_so) as h:
+        r = h.run_full(bars, "15")
+        assert len(r.pending_orders) == h.lib.strategy_pending_orders_len(h._s)
+        if r.pending_orders:
+            po = r.pending_orders[0]
+            rc, qty, close_only, part = h.probe_fill_qty(po["index"], bars[-1][4])
+            assert rc in (0, 1)
+
 def test_abort_returns_not_completed(test_so, test_feed):
     bars = load_bars(test_feed)  # full feed (~222k bars) so the run lasts long enough
     with EngineHandle(test_so) as h:
