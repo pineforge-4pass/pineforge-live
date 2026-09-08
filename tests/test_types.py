@@ -1,4 +1,5 @@
 import copy, dataclasses, pickle
+import pytest
 from pineforge_live import types as T
 from pineforge_live.adapters import base as B
 
@@ -10,6 +11,33 @@ def test_engine_syminfo_hash_is_canonical():
     b = dataclasses.replace(a, numeric_metadata={"a": 1.0, "b": 2.0}, string_metadata={"x": "0", "y": "1"})
     assert a.hash() == b.hash() and len(a.hash()) == 64
     assert dataclasses.replace(a, mintick=0.1).hash() != a.hash()
+
+def test_engine_syminfo_coerces_numeric_types_so_hash_is_stable():
+    # Final 3: mintick=1 (int) vs 1.0 (float) configure the engine
+    # identically -- strategy_set_syminfo_mintick takes a C double either
+    # way -- but used to hash differently, so a JSON-sourced syminfo and a
+    # hand-built one could silently disagree.
+    kwargs = dict(ticker="ETHUSDT.P", tickerid="BINANCE:ETHUSDT.P", prefix="BINANCE", root="ETHUSDT", type="crypto",
+                  currency="USDT", basecurrency="ETH", pointvalue=1.0, session="24x7", timezone="UTC",
+                  volumetype="base", description="ETH perp")
+    a = T.EngineSyminfo(mintick=1, pricescale=100, minmove=1, **kwargs)
+    b = T.EngineSyminfo(mintick=1.0, pricescale=100.0, minmove=1.0, **kwargs)
+    assert a.hash() == b.hash()
+    assert isinstance(a.mintick, float) and isinstance(a.pointvalue, float)
+    assert isinstance(a.pricescale, int) and isinstance(a.minmove, int)
+
+def test_engine_syminfo_rejects_pricescale_or_minmove_in_numeric_metadata():
+    # Final 1: pricescale/minmove are delivered to the engine by
+    # EpochSpec.setter_sequence() itself (strategy_set_syminfo_metadata) --
+    # a caller also putting either key in numeric_metadata would silently
+    # double-set (and race) the value the epoch hash depends on.
+    kwargs = dict(ticker="t", tickerid="t", prefix="", root="", type="crypto", currency="USD", basecurrency="USD",
+                  mintick=0.01, pricescale=100, pointvalue=1.0, minmove=1, session="24x7", timezone="UTC",
+                  volumetype="base", description="")
+    with pytest.raises(ValueError):
+        T.EngineSyminfo(numeric_metadata={"pricescale": 50.0}, **kwargs)
+    with pytest.raises(ValueError):
+        T.EngineSyminfo(numeric_metadata={"minmove": 2.0}, **kwargs)
 
 def test_engine_syminfo_hash_unchanged_after_mutating_callers_dict():
     numeric = {"a": 1.0}

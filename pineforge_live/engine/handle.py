@@ -86,6 +86,18 @@ class EngineHandle:
     called right after run_full() keep reading the strategy that produced
     that run. The handle is the configuration (setter_log) plus the last
     run's accessors, not a single persistent engine object.
+
+    Final 2 / B2 usage: `run_full(..., per_run=[("set_probe_suppress_tail_logic",
+    (True,)), ("set_path_order", (mode,))])` applies additional setter
+    calls on top of `setter_log` for ONE run only -- replayed onto the
+    fresh strategy alongside `setter_log`, and re-applied to the resulting
+    live strategy afterward so post-run accessors see them too -- without
+    ever appending them to `setter_log`. This is how Plan B2 is expected to
+    drive the per-run probe flags `EpochSpec.setter_sequence()` hashes but
+    deliberately does not apply: calling the public `set_probe_suppress_tail_logic`/
+    `set_path_order` methods instead would append to `setter_log` on every
+    probe/evaluate call, growing the replay list without bound and
+    diverging `setter_log` from `EpochSpec.setter_sequence()`.
     """
 
     def __init__(self, so_path: str | Path, params: dict | None = None):
@@ -148,7 +160,7 @@ class EngineHandle:
     def request_abort(self):
         self.lib.strategy_request_abort(self._s)
 
-    def run_full(self, bars: Sequence, script_tf: str) -> RunResult:
+    def run_full(self, bars: Sequence, script_tf: str, *, per_run: Sequence[tuple[str, tuple]] = ()) -> RunResult:
         # Validate BEFORE any engine call, and before a strategy is created:
         # run_backtest_full hands script_tf straight to the engine's own
         # timeframe parser, which does an uncaught C++ stoi cast on it -- a
@@ -156,6 +168,13 @@ class EngineHandle:
         # just this call. Must be a non-empty string (tf_ms() itself assumes
         # .strip() and would raise AttributeError, not ValueError, on None)
         # accepted by tf_ms(); its ValueError propagates.
+        # Final 2: `per_run` -- e.g. Plan B2's `set_probe_suppress_tail_logic`/
+        # `set_path_order` (see EpochSpec.setter_sequence()'s docstring) --
+        # is replayed onto the fresh strategy on top of setter_log for THIS
+        # run only, and is never appended to setter_log: a naive B2 that
+        # called the public set_* methods per probe/evaluate would grow the
+        # replay list (and diverge setter_log from setter_sequence()) once
+        # per call, without bound.
         if not isinstance(script_tf, str) or not script_tf:
             raise ValueError(f"bad timeframe {script_tf!r}")
         tf_ms(script_tf)
@@ -176,6 +195,8 @@ class EngineHandle:
         try:
             for name, args in self.setter_log:
                 _SETTER_APPLY[name](self.lib, new_s, *args)
+            for name, args in per_run:
+                _SETTER_APPLY[name](self.lib, new_s, *args)
         except Exception:
             self.lib.strategy_free(new_s)
             raise
@@ -189,11 +210,20 @@ class EngineHandle:
             err = self.lib.strategy_get_last_error(new_s)
             if err and self.lib.strategy_last_run_status(new_s) == 0:
                 raise abi.EngineAbiError(f"{self.so_path}: {err.decode('utf-8', 'replace')}")
-            return collect(self.lib, new_s, rep, self._layout)
+            result = collect(self.lib, new_s, rep, self._layout)
         finally:
             self.lib.report_free(ctypes.byref(rep))
             if old_s:
                 self.lib.strategy_free(old_s)
+        # Final 2: re-apply per_run to the strategy that just produced this
+        # run (now self._s) so pending-order / scalar accessors called
+        # AFTER run_full() returns -- probe_fill_qty, level_resolved,
+        # effective_levels, and report.collect()'s own scalar readers on a
+        # future accessor call -- see the run's actual per-run
+        # configuration, not just the (permanent) setter_log prefix.
+        for name, args in per_run:
+            _SETTER_APPLY[name](self.lib, self._s, *args)
+        return result
 
     # --- accessors used by the probe (Plan B2) ------------------------------
     # These read the strategy that produced the LAST run_full() (or, before

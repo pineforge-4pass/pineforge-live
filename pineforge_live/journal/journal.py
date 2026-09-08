@@ -117,6 +117,26 @@ class Journal:
             sync = con.execute("PRAGMA synchronous").fetchone()[0]
             if int(sync) != 2:
                 raise JournalFault(f"synchronous=FULL not honored for {path} (synchronous={sync!r})")
+            # R10: on a file that already existed, check whether it even
+            # HAS a schema_meta table before running the DDL script --
+            # `executescript(DDL)`'s `CREATE TABLE IF NOT EXISTS schema_meta`
+            # would otherwise silently add the (empty) table to a genuinely
+            # pre-schema-versioning file moments before refusing to open it,
+            # so a refused file no longer comes back byte-for-byte
+            # unchanged, and once SCHEMA_VERSION bumps past 1 the same
+            # ordering would apply a future migration's DDL to a v0 file
+            # before refusing it. A file that already has the table (just
+            # missing its row, or holding a mismatched version) is judged
+            # below, after the DDL, exactly as before.
+            if existed:
+                has_schema_meta = con.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta'"
+                ).fetchone()
+                if has_schema_meta is None:
+                    raise JournalFault(
+                        f"journal {path} has no schema_meta table (pre-schema-versioning journal; "
+                        "v1 journals are not migrated)"
+                    )
             con.executescript(DDL)
             # R4: schema_meta(version) is the durable record of which shape
             # this journal was created under. A fresh file writes its
@@ -283,7 +303,14 @@ class Journal:
             self._exec("COMMIT")
             stored["checksum"] = chk
             return stored
-        except Exception:
+        except BaseException:
+            # Final 9: a KeyboardInterrupt/SystemExit landing between BEGIN
+            # IMMEDIATE and COMMIT is not an Exception -- `except Exception`
+            # let it propagate straight through the open transaction,
+            # leaving the connection's next append failing with "cannot
+            # start a transaction within a transaction" (R6 hardened
+            # Journal.open() for BaseException; this closes the same gap
+            # for the write path).
             try:
                 self.con.execute("ROLLBACK")
             except sqlite3.Error:
@@ -407,14 +434,24 @@ class Journal:
         return cur.rowcount > 0
     def append_check(self, fencing_token: int, lease_expiry_ms: int, row: dict[str, Any] | None = None):
         self._insert("checks", {"fencing_token": fencing_token, "lease_expiry_ms": lease_expiry_ms, "row_json": json.dumps(row or {}, sort_keys=True)})
-    def update_check_expiry(self, fencing_token: int, lease_expiry_ms: int) -> None:
+    def update_check_expiry(self, fencing_token: int, lease_expiry_ms: int) -> int:
         """N4/R2: renew() calls this (under the same `_flock()`) to extend
         the SAME `checks` row `acquire()` wrote, so `live_check()`'s guard
         keeps covering a renewing holder past its original acquire-time
         `lease_ms` window -- not just the first lease period. `checks` is
         not checksummed, so a plain UPDATE is safe here (finding 4/5 do not
-        apply)."""
-        self._exec("UPDATE checks SET lease_expiry_ms=? WHERE fencing_token=?", (lease_expiry_ms, fencing_token))
+        apply).
+
+        Returns the number of rows updated (0 or 1: `fencing_token` is the
+        table's PRIMARY KEY). By construction this row always exists --
+        `acquire()` inserts it into this same journal before the lock file
+        is ever written -- so 0 is a signal, not a normal outcome: the
+        `checks` row is gone (vacuumed, replaced, or never existed for this
+        token). `renew()` treats that as `LeaseLost` rather than silently
+        believing it extended a lease nothing durable backs (the rowcount
+        concern noted in task-4-rereview-3.md)."""
+        cur = self._exec("UPDATE checks SET lease_expiry_ms=? WHERE fencing_token=?", (lease_expiry_ms, fencing_token))
+        return cur.rowcount
 
     # --- readers ----------------------------------------------------------------
     def last_settlement(self, epoch_hash: str) -> dict[str, Any] | None:

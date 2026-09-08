@@ -60,18 +60,38 @@ class StopMarker:
                 # Armed-only (all-zero, or an empty/short file). R3: top up
                 # a short file to the full preallocated SIZE -- idempotent
                 # (a no-op once it is already SIZE bytes).
+                #
+                # R7: this is check-then-write (stat() then a separate
+                # open+write) -- a concurrent write() (an emergency STOP
+                # from the previous holder landing in exactly this window)
+                # could otherwise race the pad. Padding via O_APPEND rather
+                # than an explicit-offset pwrite closes that: an append can
+                # only add bytes past whatever the file's CURRENT end is at
+                # the moment the write syscall actually runs (re-read by
+                # the kernel then, not our stale `size`), so it can never
+                # overwrite bytes a racing write() already put at the
+                # front of the file -- the worst case is a harmless
+                # over-length file (write()'s own pwrite(..., 0) still
+                # lands the payload at the front; _payload() only reads up
+                # to the first newline). Do NOT use pwrite(fd, buf, size)
+                # here even with O_APPEND set: Linux ignores the explicit
+                # offset under O_APPEND, but POSIX does not require that,
+                # so only the offset-less os.write() form is portable.
                 size = self.path.stat().st_size
                 if size < SIZE:
-                    pad_fd = os.open(self.path, os.O_WRONLY | getattr(os, "O_SYNC", 0))
+                    pad_fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | getattr(os, "O_SYNC", 0))
                     try:
                         buf = b"\0" * (SIZE - size)
-                        n = os.pwrite(pad_fd, buf, size)
+                        n = os.write(pad_fd, buf)
                         if n != len(buf):
                             raise JournalFault(f"short preallocate pad for STOP marker {self.path}: {n}/{len(buf)} bytes")
                         os.fsync(pad_fd)
                     finally:
                         os.close(pad_fd)
                     self._fsync_dir()
+                    # A concurrent write() that landed between our stat()
+                    # and the pad above is preserved (never disarmed) by
+                    # construction -- nothing further to do either way.
                 return
             try:
                 buf = b"\0" * SIZE
@@ -135,7 +155,15 @@ class StopMarker:
             return None
         try:
             obj = json.loads(head)
-        except json.JSONDecodeError:
+        except ValueError:
+            # R9: json.loads on bytes runs json.detect_encoding first, which
+            # can raise UnicodeDecodeError (a ValueError, not a
+            # json.JSONDecodeError) on a head starting with NUL bytes --
+            # read as a UTF-32 BOM heuristic -- followed by non-JSON
+            # garbage. Catching ValueError covers both (JSONDecodeError is
+            # itself a ValueError subclass) with the same "unreadable"
+            # normalization, consistent with R5's "any error is normalized"
+            # contract for prepare()/write().
             return {"unreadable": True, "raw": raw[:200]}
         if not isinstance(obj, dict):
             return {"unreadable": True, "raw": raw[:200]}

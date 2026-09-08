@@ -47,6 +47,7 @@ def test_tf_ms_bounds_seconds_not_just_the_multiplier():
     # converted to seconds. tf_ms must bound the product, not just the
     # multiplier: 24855D/3550W fit; 24856D/3551W overflow and must raise.
     assert policy.tf_ms("24855D") == 24855 * 86_400_000
+    assert policy.tf_ms("3550W") == 3550 * 604_800_000  # N5: pin the W-side edge symmetrically
     for bad in ("24856D", "3551W"):
         with pytest.raises(ValueError):
             policy.tf_ms(bad)

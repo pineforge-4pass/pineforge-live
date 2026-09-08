@@ -1,9 +1,12 @@
-import json, os, sqlite3
+import hashlib, json, os, sqlite3
+from pathlib import Path
 import pytest
 from pineforge_live.journal import (
     Journal, StopMarker, FencedLease, JournalCorrupt, JournalConflict,
     JournalFault, LeaseHeld, LeaseLost, StopMarkerPresent,
 )
+from pineforge_live.journal import journal as journal_mod
+from pineforge_live.journal.schema import DDL
 from pineforge_live import types as T
 
 def settlement(i, epoch="e1", **overrides):
@@ -555,3 +558,168 @@ def test_open_refuses_a_pre_schema_versioning_journal(tmp_path):
     con = sqlite3.connect(p); con.execute("DELETE FROM schema_meta"); con.commit(); con.close()
     with pytest.raises(JournalFault, match="not migrated"):
         Journal.open(p, create=False)
+
+
+# --- final fix wave (task-4-rereview-3.md R7-R11, rowcount; final-review.md Final 8/9) ---
+
+def test_prepare_pad_races_a_concurrent_write_without_disarming_it(tmp_path, monkeypatch):
+    # R7: the R3 pad path is check-then-write (stat() then a separate
+    # open+write) -- if another process's write() (an emergency STOP from
+    # the previous holder, landing in exactly the window N1 was about)
+    # landed between them, the old explicit-offset pwrite would overwrite
+    # the just-written payload with zeros, disarming it. Padding via
+    # O_APPEND instead means the pad can only add bytes past whatever the
+    # file's CURRENT end is when the write syscall actually runs (the
+    # kernel re-reads that then, not our stale `size`) -- it can never
+    # overwrite bytes a racing write() already put at the front of the
+    # file, so the worst case is a harmless over-length file.
+    m = StopMarker(tmp_path / "j.sqlite3.stop")
+    m.path.write_bytes(b"")  # short/armed, as in the R3 crash scenario
+    real_stat = Path.stat
+    raced = []
+    def racing_stat(self, *a, **kw):
+        # prepare()'s only Path.stat() call on this file is its explicit
+        # size check (_payload()'s exists() check uses os.path.exists(),
+        # not Path.stat(), on this Python version) -- capture the OLD
+        # (short) size first, exactly as the real call would, THEN inject
+        # the race so the returned size is stale relative to the file the
+        # subsequent pad write actually sees.
+        result = real_stat(self, *a, **kw)
+        if self == m.path and not raced:
+            raced.append(True)
+            StopMarker(m.path).write("HARD", "HOLD", "raced in")
+        return result
+    monkeypatch.setattr(Path, "stat", racing_stat)
+
+    m.prepare()
+
+    assert m.exists()  # the race's SET marker survived the pad -- not disarmed
+    assert m.read()["cause"] == "raced in"
+
+
+def test_stop_marker_payload_normalises_unicode_decode_error(tmp_path):
+    # R9: json.loads on bytes runs json.detect_encoding first, which reads
+    # a head starting with NUL bytes as a UTF-32 BOM heuristic and can raise
+    # UnicodeDecodeError -- a ValueError, but not a json.JSONDecodeError --
+    # on a torn/garbage payload. Must normalize to "unreadable" the same as
+    # a JSONDecodeError does, not escape raw.
+    m = StopMarker(tmp_path / "j.sqlite3.stop")
+    m.path.write_bytes(b"\0" * 50 + b"xyz")
+    r = m.read()
+    assert r is not None and r.get("unreadable") is True
+    with pytest.raises(StopMarkerPresent):
+        Journal.open(tmp_path / "j.sqlite3", stop_marker=m)
+
+
+def test_open_refuses_a_file_with_no_schema_meta_table_without_mutating_it(tmp_path):
+    # R10: a GENUINELY pre-versioning file (no schema_meta table at all, not
+    # just an empty one -- built here already in WAL/synchronous=FULL mode,
+    # exactly as a real one created by an earlier version of this same code
+    # would be) must be refused BEFORE executescript(DDL) runs, so the
+    # refused file comes back byte-for-byte unchanged instead of gaining an
+    # empty schema_meta table moments before being rejected.
+    p = tmp_path / "j.sqlite3"
+    ddl_without_schema_meta = "\n".join(
+        line for line in DDL.strip().splitlines() if "schema_meta" not in line
+    )
+    con = sqlite3.connect(p, isolation_level=None)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=FULL")
+    con.executescript(ddl_without_schema_meta)
+    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")  # fully settled: nothing left for a later connection to checkpoint
+    con.close()
+    before = hashlib.sha256(p.read_bytes()).hexdigest()
+    with pytest.raises(JournalFault, match="no schema_meta table"):
+        Journal.open(p, create=False)
+    after = hashlib.sha256(p.read_bytes()).hexdigest()
+    assert before == after
+
+
+def test_update_check_expiry_returns_rowcount(tmp_path):
+    # rowcount: the implementer's own concern from task-4-rereview-3.md --
+    # a silent no-op UPDATE would let renew() believe it extended a lease
+    # nothing durable backs.
+    j = Journal.open(tmp_path / "j.sqlite3")
+    j.append_check(1, 1_000)
+    assert j.update_check_expiry(1, 5_000) == 1
+    assert j.update_check_expiry(999, 5_000) == 0  # no such fencing_token
+    j.close()
+
+
+def test_renew_raises_lease_lost_when_checks_row_is_gone(tmp_path):
+    # rowcount: if the checks row acquire() wrote has vanished by the time
+    # renew() runs, update_check_expiry's rowcount is 0 -- renew() must not
+    # silently believe the lease extended.
+    j = Journal.open(tmp_path / "j.sqlite3")
+    lock = tmp_path / "j.lock"
+    a = FencedLease(lock, j)
+    a.acquire(lease_ms=10_000, now_ms=0)
+    j.con.execute("DELETE FROM checks WHERE fencing_token=?", (a.token,))
+    with pytest.raises(LeaseLost):
+        a.renew(now_ms=100, lease_ms=10_000)
+    assert a.token is None
+    j.close()
+
+
+def test_renew_leaves_expiry_ms_unchanged_when_update_check_expiry_fails(tmp_path, monkeypatch):
+    # R8: self.expiry_ms must only advance AFTER both the checks-row UPDATE
+    # and the lock-file write succeed. Previously it was assigned FIRST, so
+    # a JournalFault from update_check_expiry (e.g. "database is locked" --
+    # a far more plausible failure than the os.replace() this ordering
+    # originally guarded against) left this holder believing a lease
+    # nobody recorded: the lock file and the `checks` row would still say
+    # the OLD expiry while self.expiry_ms/self.expired() said otherwise.
+    j = Journal.open(tmp_path / "j.sqlite3")
+    lock = tmp_path / "j.lock"
+    a = FencedLease(lock, j)
+    a.acquire(lease_ms=1_000, now_ms=0)  # expiry_ms == 1_000
+    before_expiry = a.expiry_ms
+    def boom(*_a, **_kw):
+        raise JournalFault("database is locked")
+    monkeypatch.setattr(j, "update_check_expiry", boom)
+    with pytest.raises(JournalFault):
+        a.renew(now_ms=900, lease_ms=1_000)
+    assert a.expiry_ms == before_expiry
+    assert json.loads(lock.read_text())["expiry_ms"] == before_expiry
+    j.close()
+
+
+def test_expired_and_live_check_boundary_agree_at_exact_expiry(tmp_path):
+    # Final 8: expired() must agree with acquire()'s/live_check()'s "live
+    # iff expiry_ms > now_ms" AT THE BOUNDARY. Previously expired() used
+    # `now_ms > expiry_ms` (NOT expired at now==expiry) while a contender's
+    # acquire() already treated now==expiry as NOT live -- a one-
+    # millisecond window where the holder believed itself live while a
+    # contender could already take over.
+    j = Journal.open(tmp_path / "j.sqlite3")
+    lock = tmp_path / "j.lock"
+    a = FencedLease(lock, j)
+    a.acquire(lease_ms=1_000, now_ms=0)  # expiry_ms == 1_000
+    assert a.expired(999) is False
+    assert a.expired(1_000) is True  # boundary: now == expiry is expired, not "still live"
+    b = FencedLease(lock, j)
+    assert b.acquire(lease_ms=1_000, now_ms=1_000) == a.token + 1  # a contender agrees
+    j.close()
+
+
+def test_insert_checksummed_rolls_back_on_baseexception_not_just_exception(tmp_path, monkeypatch):
+    # Final 9: a KeyboardInterrupt/SystemExit landing between BEGIN
+    # IMMEDIATE and COMMIT is not an Exception -- `except Exception` let it
+    # propagate through the still-open transaction, so the connection's
+    # NEXT append failed with "cannot start a transaction within a
+    # transaction". R6 hardened Journal.open() for BaseException; this
+    # closes the same gap on the write path.
+    j = Journal.open(tmp_path / "j.sqlite3")
+    j.append_epoch("e1", "{}")
+
+    def boom(row):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(journal_mod, "checksum", boom)
+    with pytest.raises(KeyboardInterrupt):
+        j.append_settlement(settlement(1))
+    monkeypatch.undo()
+
+    # No leaked open transaction: a normal append right after succeeds.
+    j.append_settlement(settlement(1))
+    assert len(j.rows("settlements", "1=1", ())) == 1
+    j.close()

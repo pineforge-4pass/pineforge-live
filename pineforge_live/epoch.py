@@ -29,6 +29,12 @@ class RuntimeConfig:
     poll_interval_ms: int; drain_bound_ms: int; grace_ms: int; open_wait_ms: int; risk_limits: dict
     dead_band_ticks: int = 2; min_replace_interval_ms: int = 1000; max_eval_rate: int = 5
 
+    def __post_init__(self):
+        # Final 4: same class of bug as CodeIdentity.build_receipt (F4) --
+        # without a defensive copy, a caller mutating its own risk_limits
+        # dict after construction would silently change hash().
+        object.__setattr__(self, "risk_limits", copy.deepcopy(self.risk_limits))
+
     def hash(self) -> str:
         """SHA-256 over this config's own fields, deliberately separate
         from `EpochSpec.epoch_hash()` (spec §1): changing a RuntimeConfig
@@ -54,8 +60,11 @@ class EpochSpec:
     hashed and enforced. `probe_suppress_tail_logic` and
     `path_order_policy` are hashed here too but are NOT applied by
     `setter_sequence()` -- they are per-run probe flags owned by Plan B2,
-    which is responsible for applying (and separately verifying) its own
-    setter calls on top of this epoch's prefix for every run.
+    which applies them via `EngineHandle.run_full(..., per_run=(...))`
+    (Final 2): replayed on top of this epoch's prefix for just that one
+    run, never appended to `setter_log`, so `apply_epoch()`'s
+    `setter_log == setter_sequence()` invariant survives any number of
+    probe/evaluate calls.
     """
     venue: str; instrument: T.InstrumentId; script_tf: str; history_start_ms: int; horizon_bars: int
     code_identity: CodeIdentity; syminfo: T.EngineSyminfo; reference_tape_sha256: str
@@ -85,6 +94,19 @@ class EpochSpec:
         `apply_epoch()`'s rc check fail on a perfectly normal syminfo
         (e.g. an empty `description`) -- the value is still part of the
         epoch via `engine_syminfo_hash`, just not a setter call.
+
+        Final 1: `pricescale`/`minmove` are typed `EngineSyminfo` fields
+        (hashed via `engine_syminfo_hash`) but the engine only ever learns
+        them through `strategy_set_syminfo_metadata("pricescale"|"minmove",
+        v)` -- the same channel as `numeric_metadata`, keyed by the names
+        `engine.hpp` documents for its syminfo-metadata map. Without this,
+        a script reading `syminfo.pricescale`/`syminfo.minmove` runs live
+        with `na()` despite being graded with the real value. Emitted right
+        after `set_syminfo_pointvalue` and before the caller's
+        `numeric_metadata` keys; `EngineSyminfo.__post_init__` rejects a
+        `numeric_metadata` that also carries either key, so there is no
+        second source these two calls could disagree with.
+
         `set_realtime_tail` and `set_broker_state_hash_recording` are
         appended after inputs/overrides and before the optional
         `set_trade_start_time` -- see the class docstring for what this
@@ -98,6 +120,8 @@ class EpochSpec:
             if value:
                 seq.append(("set_syminfo_string", (key, value)))
         seq += [("set_syminfo_mintick", (s.mintick,)), ("set_syminfo_pointvalue", (s.pointvalue,))]
+        seq.append(("set_syminfo_metadata", ("pricescale", float(s.pricescale))))
+        seq.append(("set_syminfo_metadata", ("minmove", float(s.minmove))))
         for k in sorted(s.numeric_metadata):
             seq.append(("set_syminfo_metadata", (k, s.numeric_metadata[k])))
         seq += [("set_input", (k, v)) for k, v in self.inputs]

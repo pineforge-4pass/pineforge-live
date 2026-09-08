@@ -87,6 +87,13 @@ def test_child_process_blocks_on_flock_while_parent_holds_it(tmp_path):
     # lock file -- there is no live lease to trip the lock-file/checks
     # expiry checks, so the only thing that can make the child wait is
     # `_flock()`'s mutual exclusion.
+    #
+    # Final 6: the child prints READY right before calling acquire() and
+    # the parent waits for that line before starting its 0.5s hold clock --
+    # measuring "still blocked" and "elapsed" from READY, not from Popen().
+    # A margin between interpreter start + package import + Journal.open()
+    # (all of which happen before READY) and the fixed 0.5s/0.4s window
+    # used to make this test flaky on a loaded host (finding 6).
     j_path = tmp_path / "j.sqlite3"
     lock = tmp_path / "j.lock"
     j = Journal.open(j_path)
@@ -98,6 +105,7 @@ def test_child_process_blocks_on_flock_while_parent_holds_it(tmp_path):
         j = Journal.open({str(j_path)!r}, create=False)
         b = FencedLease({str(lock)!r}, j)
         t0 = time.monotonic()
+        print("READY", flush=True)
         token = b.acquire(lease_ms=1_000, now_ms=0)
         elapsed = time.monotonic() - t0
         print(f"ACQUIRED:{{token}}:{{elapsed:.3f}}")
@@ -109,13 +117,15 @@ def test_child_process_blocks_on_flock_while_parent_holds_it(tmp_path):
             [sys.executable, "-c", child_code],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
+        ready_line = proc.stdout.readline()
+        assert ready_line.strip() == "READY", (ready_line, proc.stderr.read())
         time.sleep(0.5)
-        assert proc.poll() is None, "child should still be blocked on the flock 0.5s in"
+        assert proc.poll() is None, "child should still be blocked on the flock 0.5s after READY"
     stdout, stderr = proc.communicate(timeout=15)
     assert proc.returncode == 0, stderr
     marker, token_str, elapsed_str = stdout.strip().split(":")
     assert marker == "ACQUIRED", (stdout, stderr)
-    assert float(elapsed_str) >= 0.4, f"child should have blocked on the flock: {stdout}"
+    assert float(elapsed_str) >= 0.4, f"child should have blocked on the flock (measured from READY): {stdout}"
     j.close()
 
 def test_child_process_without_flock_does_not_block_control(tmp_path):

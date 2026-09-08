@@ -31,8 +31,11 @@ def cmd_engine_info(a):
 
 def cmd_journal_inspect(a):
     """Print `journal`'s per-table row counts, its last settlement, the
-    non-terminal action client_ids, and the stop marker's state -- a
-    read-only diagnostic that never writes to the journal."""
+    non-terminal action client_ids, and the stop marker's state.
+    Read-only on a v1 journal (opens the journal normally; refuses a torn
+    tail) -- Journal.open() itself issues `PRAGMA journal_mode=WAL` and
+    `executescript(DDL)` on every open, which are no-ops on an
+    already-current v1 journal but are not literally "never writes"."""
     # NOTE: adapted to the journal API as of 1105a2c, which post-dates the
     # brief this command was drafted against:
     #  - actions has no `terminal` column any more; actions_non_terminal()
@@ -72,13 +75,15 @@ def cmd_journal_inspect(a):
 
 def _positive_int(s: str) -> int:
     """argparse `type=` validator for `--bars`: a base-10 positive int, or
-    `ArgumentTypeError` (argparse turns this into an exit-2 usage error)."""
+    `ArgumentTypeError` (argparse turns this into an exit-2 usage error).
+    N2: argparse already prefixes the message with `argument --bars:`, so
+    this message must not repeat `--bars` itself."""
     try:
         n = int(s)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"--bars must be a positive integer, got {s!r}") from None
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {s!r}") from None
     if n < 1:
-        raise argparse.ArgumentTypeError(f"--bars must be a positive integer, got {s!r}")
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {s!r}")
     return n
 
 
@@ -130,7 +135,8 @@ def main(argv=None) -> int:
     s.set_defaults(fn=cmd_engine_info)
 
     s = sub.add_parser("journal-inspect", description="Print a journal's per-table row counts, last "
-                        "settlement, non-terminal actions, and stop-marker state. Read-only.",
+                        "settlement, non-terminal actions, and stop-marker state. Read-only on a v1 "
+                        "journal (opens the journal normally; refuses a torn tail).",
                         help="print a journal's table counts, last settlement, and stop-marker state")
     s.add_argument("journal", type=Path, help="path to the journal's sqlite3 file")
     s.set_defaults(fn=cmd_journal_inspect)

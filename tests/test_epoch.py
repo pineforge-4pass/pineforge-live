@@ -29,6 +29,36 @@ def test_runtime_config_hash_separate_from_epoch():
     rc2 = dataclasses.replace(rc1, dead_band_ticks=3)
     assert rc1.hash() != rc2.hash() and spec().epoch_hash() == spec().epoch_hash()
 
+def test_runtime_config_deep_copies_risk_limits():
+    # Final 4: same class of bug F4 already fixed for CodeIdentity.build_receipt
+    # and EpochSpec.inputs/overrides -- without a defensive copy, mutating the
+    # caller's risk_limits dict after construction silently changes hash().
+    limits = {"max_abs_position": 1.0, "nested": {"a": 1}}
+    rc = RuntimeConfig(poll_interval_ms=1, drain_bound_ms=1, grace_ms=1, open_wait_ms=1, risk_limits=limits)
+    before = rc.hash()
+    limits["nested"]["a"] = 999
+    assert rc.hash() == before
+    assert rc.risk_limits["nested"]["a"] == 1
+
+def test_setter_sequence_delivers_pricescale_and_minmove_metadata():
+    # Final 1: pricescale/minmove are hashed via EngineSyminfo.hash() but
+    # must also be DELIVERED to the engine -- strategy_set_syminfo_metadata,
+    # right after set_syminfo_pointvalue and before the caller's
+    # numeric_metadata -- or a script reading syminfo.pricescale/minmove
+    # runs live with na() despite being graded with the real value.
+    seq = spec().setter_sequence()
+    pv_idx = seq.index(("set_syminfo_pointvalue", (1.0,)))
+    assert seq[pv_idx + 1] == ("set_syminfo_metadata", ("pricescale", 100.0))
+    assert seq[pv_idx + 2] == ("set_syminfo_metadata", ("minmove", 1.0))
+
+def test_numeric_metadata_cannot_override_pricescale_or_minmove():
+    # Final 1: a caller-supplied numeric_metadata entry for either key would
+    # silently double-set the value the epoch hash depends on -- rejected at
+    # EngineSyminfo construction (see test_types.py for the direct test);
+    # this pins the EpochSpec-level path a caller is actually likely to hit.
+    with pytest.raises(ValueError):
+        spec(syminfo=dataclasses.replace(syminfo(), numeric_metadata={"pricescale": 50.0}))
+
 def test_apply_epoch_replays_exact_setter_sequence(test_so):
     from pineforge_live.engine import EngineHandle
     s = spec()
@@ -39,6 +69,20 @@ def test_apply_epoch_replays_exact_setter_sequence(test_so):
     # F2: the epoch's realtime-tail flag/horizon now reach the engine, ordered
     # after inputs/overrides and before the (unset here) trade-start-time.
     assert log[-2:] == [("set_realtime_tail", (True, 500_000)), ("set_broker_state_hash_recording", (True,))]
+
+def test_run_full_per_run_flags_preserve_apply_epoch_invariant(test_so):
+    """Final 2 (B2 input #3): EngineHandle.run_full(..., per_run=...) must
+    never touch setter_log -- apply_epoch()'s setter_log == setter_sequence()
+    invariant must still hold after any number of per_run-flagged runs."""
+    from pineforge_live.engine import EngineHandle
+    s = spec()
+    bars = [(1_577_836_800_000 + i * 900_000, 100.0, 101.0, 99.0, 100.5, 10.0) for i in range(50)]
+    with EngineHandle(test_so) as h:
+        log = apply_epoch(h, s)
+        for _ in range(3):
+            h.run_full(bars, "15", per_run=[("set_probe_suppress_tail_logic", (True,)),
+                                             ("set_path_order", (2,))])
+        assert h.setter_log == log == s.setter_sequence()
 
 def test_empty_syminfo_string_is_skipped_and_apply_still_succeeds(test_so):
     # F3: the engine rejects (rc=-1) an empty-valued set_syminfo_string;

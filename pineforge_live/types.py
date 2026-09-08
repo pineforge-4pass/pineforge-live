@@ -49,10 +49,32 @@ class EngineSyminfo:
     numeric_metadata: dict[str, float] = field(default_factory=dict)
     string_metadata: dict[str, str] = field(default_factory=dict)
     def __post_init__(self):
+        # Final 1: pricescale/minmove are delivered to the engine by
+        # EpochSpec.setter_sequence() itself (strategy_set_syminfo_metadata,
+        # emitted right after set_syminfo_pointvalue -- see that method's
+        # docstring). A caller also putting either key in numeric_metadata
+        # would silently double-set it and make the epoch hash depend on
+        # whichever value happened to be inserted last -- reject it here,
+        # at construction, rather than let it drift.
+        if "pricescale" in self.numeric_metadata or "minmove" in self.numeric_metadata:
+            raise ValueError(
+                "EngineSyminfo.numeric_metadata must not set 'pricescale'/'minmove' -- "
+                "those are delivered via the dedicated pricescale/minmove fields "
+                "(EpochSpec.setter_sequence() emits them itself)"
+            )
+        # Final 3: mintick/pointvalue/numeric_metadata values are coerced to
+        # float and pricescale/minmove to int so mintick=1 and mintick=1.0
+        # (which configure the engine identically -- strategy_set_syminfo_mintick
+        # takes a C double either way) hash identically instead of drifting
+        # by the caller's chosen Python numeric type.
+        object.__setattr__(self, "mintick", float(self.mintick))
+        object.__setattr__(self, "pointvalue", float(self.pointvalue))
+        object.__setattr__(self, "pricescale", int(self.pricescale))
+        object.__setattr__(self, "minmove", int(self.minmove))
         # Defensive copies: freezing is shallow, so without this the caller's dict
         # can be mutated after construction and silently change .hash(). Plain
         # dict copies (not MappingProxyType — that breaks asdict()/pickling).
-        object.__setattr__(self, "numeric_metadata", dict(self.numeric_metadata))
+        object.__setattr__(self, "numeric_metadata", {k: float(v) for k, v in self.numeric_metadata.items()})
         object.__setattr__(self, "string_metadata", dict(self.string_metadata))
     def hash(self) -> str: return canonical_sha256(asdict(self))
 

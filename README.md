@@ -12,6 +12,8 @@ engine's ABI v4 tail flags. Design: `pineforge-workflow-live/docs/superpowers/sp
 - `pineforge_live/journal/` — SQLite WAL journal, sidecar STOP marker, fencing lease.
 - `pineforge_live/epoch.py` — epoch / code identity / runtime config hashes.
 - `pineforge_live/adapters/tape.py` — bar/tick tape adapters and a drivable clock.
+- `pineforge_live/cli.py` — the `pineforge-live` operator CLI: `version` | `engine-info` | `journal-inspect` | `tape-smoke` (installed as the `pineforge-live` console script, `pyproject.toml`'s `[project.scripts]`).
+- `scripts/build_engine.sh` — builds the pinned engine checkout at `PINEFORGE_ENGINE_ROOT` and its corpus fixtures, so the engine-backed tests (and `tape-smoke`) have a compiled strategy `.so`/`.dylib` and a derived feed to run against.
 
 ## Tests
 `PINEFORGE_ENGINE_ROOT=~/code/pineforge-engine-wt/main python3 -m pytest -q`

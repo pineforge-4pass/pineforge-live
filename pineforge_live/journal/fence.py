@@ -99,14 +99,36 @@ class FencedLease:
                 # token even after another holder has taken over.
                 self.token = None
                 raise LeaseLost(f"lease token {held_token} lost (lock file now {cur})")
-            self.expiry_ms = now_ms + lease_ms
-            # N4/R2: extend the journal's `checks` row too, not just the
-            # lock file -- otherwise acquire()'s checks-table guard only
-            # covers the initial lease_ms window and a lock file deleted
-            # after a renewal reopens the original N4 hole.
-            self.journal.update_check_expiry(held_token, self.expiry_ms)
+            # R8: compute the new expiry locally and only assign it to
+            # self.expiry_ms LAST, after both durable writes (the `checks`
+            # row, then the lock file) succeed. Previously self.expiry_ms
+            # was advanced first: a JournalFault from update_check_expiry
+            # (e.g. "database is locked", far more plausible than the
+            # os.replace() failure this ordering originally guarded
+            # against) would leave this holder believing a lease nobody
+            # recorded -- both the lock file and the `checks` row would
+            # still say the OLD (possibly already-past) expiry while
+            # self.expiry_ms/self.expired() said otherwise. On any failure
+            # here self.expiry_ms is simply left at its previously
+            # recorded (durable) value.
+            new_expiry = now_ms + lease_ms
+            # rowcount: update_check_expiry returns 0 when the `checks` row
+            # this lease's acquire() wrote is gone (vacuumed, replaced) --
+            # a renew that silently no-ops there would let this holder
+            # believe it extended a lease nothing durable backs.
+            rowcount = self.journal.update_check_expiry(held_token, new_expiry)
+            if rowcount == 0:
+                self.token = None
+                raise LeaseLost(f"checks row for fencing token {held_token} is missing; cannot renew")
             tmp = self.lock_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"token": self.token, "expiry_ms": self.expiry_ms})); os.replace(tmp, self.lock_path)
+            tmp.write_text(json.dumps({"token": self.token, "expiry_ms": new_expiry})); os.replace(tmp, self.lock_path)
+            self.expiry_ms = new_expiry
 
     def expired(self, now_ms: int) -> bool:
-        return self.expiry_ms is None or now_ms > self.expiry_ms
+        # Final 8: consistent with acquire()'s/live_check()'s "live iff
+        # expiry_ms > now_ms" -- at now_ms == expiry_ms neither treats the
+        # lease as live, so expired() must agree it is expired (`>=`, not
+        # `>`) rather than leaving a one-millisecond window where the
+        # holder believes itself live while a contender can already
+        # acquire.
+        return self.expiry_ms is None or now_ms >= self.expiry_ms
