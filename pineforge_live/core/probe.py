@@ -256,6 +256,22 @@ class Probe:
                                        "forming_json": json.dumps(forming.ohlcv()), "outcome": outcome, "recompute_ms": ms,
                                        "created_ms": now_ms})   # N8: the tick's own now_ms, not just the insert-time default
 
+    def _journal_drops(self, journal, n: int, now_ms: int, dropped: list[ProbeFill]) -> None:
+        """N11 (task-4 `created_now` PARTIAL carry, task-6 review finding
+        9): one `probe_dropped_entry` incident per ENTRY-leg fill
+        `_drop_unresting_entries` dropped this call -- an entry fill whose
+        intent wasn't resting in the pre-run settled book is a genuine
+        anomaly (a stale/short-circuited read, or an order the probe
+        should never have been able to see at all; see that function's
+        docstring), worth an audit trail even though it never reaches
+        `fills`/`deferred`. No-op when no journal is given (matches every
+        other `append_*` call site in this module)."""
+        if journal is None:
+            return
+        for f in dropped:
+            journal.append_incident("probe_dropped_entry", {"bar_index": n, "intent": f.intent, "leg": f.leg,
+                                                             "is_long": f.is_long, "qty": f.qty, "price": f.price, "now_ms": now_ms})
+
     def evaluate(self, forming: T.NormalizedBar, now_ms: int, journal=None) -> ProbeResult:
         """Recompute through `forming` (the bar currently building) and
         return what would fill if it settled right now. Runs `P_auto`
@@ -314,6 +330,11 @@ class Probe:
         d_auto = _delta_fill(p_auto, self.L.last.position_size, forming, book, n)
         auto_all = last_bar_fills(p_auto, n) + ([d_auto] if d_auto is not None else [])
         auto_fills, dropped = _drop_unresting_entries(auto_all, resting_ids)
+        # N11: journal here, once, immediately after `dropped` is computed
+        # -- so it fires on every return path below (a clean result, a
+        # P_other abort, or the guard-suppressed path), not just the
+        # common case.
+        self._journal_drops(journal, n, now_ms, dropped)
 
         fills, deferred, other_ran = [], [], False
         if auto_fills:

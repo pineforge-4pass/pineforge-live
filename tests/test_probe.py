@@ -246,3 +246,89 @@ def test_same_sig_fills_pair_by_ordinal_not_collapse(monkeypatch):
     by_qty = sorted(r.fills, key=lambda f: f.qty)
     assert by_qty[0].qty == pytest.approx(1.0) and not by_qty[0].qty_disagreement
     assert by_qty[1].qty == pytest.approx(2.0) and by_qty[1].qty_disagreement
+
+
+def test_dropped_entry_journals_an_incident(monkeypatch):
+    """N11 pin (task-4 `created_now` PARTIAL carry, task-6 review finding
+    9): each ENTRY-leg fill `_drop_unresting_entries` drops -- its intent
+    was not resting in the pre-run settled book -- must journal a
+    `probe_dropped_entry` incident when a journal is given. No engine
+    needed: `Probe._run` is monkeypatched to return one canned `RunResult`
+    with NO closed trades, whose position delta (0.0 -> 1.0) `_delta_fill`
+    explains as one ENTRY delta fill -- `_resolve_intent` on the (empty)
+    pre-run book resolves it to `"?"`, which is never resting, so
+    `_drop_unresting_entries` drops it; `auto_fills` is then empty, so the
+    flow never needs a P_other run."""
+    n = 20
+
+    def run_result() -> RunResult:
+        return RunResult(status=0, trades=[], net_profit=0.0, script_bars_processed=n + 1, broker_state_hash=[],
+                         position_size=1.0, position_avg_price=100.0, position_cycle_seq=0,
+                         trail_best_price=float("nan"), current_equity=0.0, last_bar_dual_entry_path=-1, pending_orders=[])
+
+    fake_ledger = SimpleNamespace(last=SimpleNamespace(book={}, position_size=0.0), n=n, bars=[])
+    fake_spec = SimpleNamespace(epoch_hash=lambda: "epoch")
+    forming = T.NormalizedBar(0, 100.0, 105.0, 95.0, 100.0, 1.0, 1, is_forming=True)
+
+    incidents = []
+    fake_journal = SimpleNamespace(append_incident=lambda kind, detail: incidents.append((kind, detail)),
+                                   append_evaluation=lambda row: None)
+
+    P = Probe(handle=None, spec=fake_spec, ledger=fake_ledger, trail_refresh_policy="bar_open_level")
+    monkeypatch.setattr(P, "_run", lambda bars, path_order: run_result())
+
+    r = P.evaluate(forming, now_ms=123, journal=fake_journal)
+    assert r.fills == [] and len(r.dropped) == 1 and r.dropped[0].intent == "?" and r.dropped[0].leg == "ENTRY"
+    assert incidents == [("probe_dropped_entry", {"bar_index": n, "intent": "?", "leg": "ENTRY",
+                                                   "is_long": True, "qty": 1.0, "price": 100.0, "now_ms": 123})]
+
+    # no journal given -- must not raise, and obviously nothing recorded.
+    P2 = Probe(handle=None, spec=fake_spec, ledger=fake_ledger, trail_refresh_policy="bar_open_level")
+    monkeypatch.setattr(P2, "_run", lambda bars, path_order: run_result())
+    r2 = P2.evaluate(forming, now_ms=123, journal=None)
+    assert len(r2.dropped) == 1
+
+
+def test_intrabar_best_levels_pin_at_bracket_bar_2044(test_so_bracket, test_feed, tmp_path):
+    """M2 pin (task-4 PARTIAL carry, task-6 review finding 9): the
+    `intrabar_best` trail policy's `probe_book` capture (immediately after
+    P_auto, before P_other runs -- see `evaluate()`'s M2 comment) on the
+    bracket fixture at bar 2044, where the bracket's EXIT leg ("XL")
+    fills intrabar and P_other confirms it (tick 3 of 4, `path4` policy,
+    empirically verified against the real engine): every settled intent
+    key must still be present in `levels`, and XL's own refreshed
+    (stop, limit, activation) must read the ATR bracket's real numbers,
+    not the bar-open-level's stale ones (both policies happen to agree at
+    this exact bar/tick, per the task-6 review, but only `intrabar_best`
+    is pinned here -- `bar_open_level` already has its own pin at
+    2005/2006 in `test_book_captured_before_probe_run`)."""
+    spec = corpus_spec_bracket(); h = make_handle(test_so_bracket, spec); j, _ = open_journal(tmp_path)
+    j.append_epoch(spec.epoch_hash(), "{}")
+    bars = load_bars(test_feed, 2050)
+    L = Ledger(h, spec, j, "rc"); L.seed(bars[:2000])
+    for i in range(2000, 2044):
+        L.settle(bars[i], now_ms=bars[i].ts_open + 900_000)
+
+    P = Probe(h, spec, L, trail_refresh_policy="intrabar_best")
+    bar = bars[2044]
+    src = TapeTickSource([bar], spec.script_tf, policy="path4", seed=1)
+    fb = FormingBarBuilder(spec.script_tf)
+
+    async def ticks():
+        return [e.tick async for e in src.subscribe(T.InstrumentId("TAPE", T.MarketType.PERP, "ETHUSDT"), 0) if isinstance(e, T.Tick)]
+
+    r = None
+    for t in asyncio.run(ticks()):
+        fb.push(t)
+        r = P.evaluate(fb.forming(), now_ms=t.ts, journal=j)
+        if any(f.intent == "XL" and f.leg == "EXIT" for f in r.fills):
+            break
+
+    assert r is not None and r.p_other_ran
+    assert [(f.intent, f.leg) for f in r.fills if f.intent == "XL"] == [("XL", "EXIT")]
+    assert set(r.levels.keys()) == set(L.last.book.keys())
+    xl_key = next(k for k in r.levels if k.startswith("XL|"))
+    stop, limit, activation = r.levels[xl_key]
+    assert stop == pytest.approx(169.1312, abs=1e-4)
+    assert limit == pytest.approx(170.9484, abs=1e-4)
+    assert activation is None
