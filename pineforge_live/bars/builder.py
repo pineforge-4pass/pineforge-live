@@ -15,7 +15,7 @@ class FormingBarBuilder:
     """Builds script-TF bars from ticks: open = first print, H/L/C/V/trade_count fold
     every print; a skipped bucket becomes a carry-forward zero-volume bar."""
     def __init__(self, tf: str):
-        self.tf = tf; self._tf_ms = tf_ms(tf); self._cur: T.NormalizedBar | None = None; self._last_closed: T.NormalizedBar | None = None
+        self.tf = tf; self._tf_ms = tf_ms(tf); self._cur: T.NormalizedBar | None = None
     def forming(self) -> T.NormalizedBar | None:
         return self._cur
     def push(self, t: T.NormalizedTick) -> list[T.NormalizedBar]:
@@ -27,7 +27,7 @@ class FormingBarBuilder:
         if start < self._cur.ts_open:
             raise ValueError(f"tick {t.ts} precedes forming bar {self._cur.ts_open}")
         while start > self._cur.ts_open:
-            closed = replace(self._cur, is_forming=False); out.append(closed); self._last_closed = closed
+            closed = replace(self._cur, is_forming=False); out.append(closed)
             nxt = self._cur.ts_open + self._tf_ms
             if nxt == start:
                 self._cur = T.NormalizedBar(start, t.price, t.price, t.price, t.price, t.qty, 1, is_forming=True)
@@ -39,12 +39,18 @@ class FormingBarBuilder:
         return out
 
 def compare_bar(a: T.NormalizedBar, b: T.NormalizedBar) -> list[str]:
+    """Spec §2 bar_mismatch test: ts_open/o/h/l/c exact as parsed doubles, v within
+    VOLUME_TOL. trade_count, is_forming and synthesized are deliberately not
+    compared (the confirmed kline does not carry them)."""
     diff = [k for k in ("ts_open", "o", "h", "l", "c") if getattr(a, k) != getattr(b, k)]
     if abs(a.v - b.v) > VOLUME_TOL:
         diff.append("v")
     return diff
 
 def bars_hash(prev: int, bar: T.NormalizedBar) -> int:
+    """FNV-1a 64 chain over one bar. Chain contract: prev=0 means "no previous"
+    (seeds from _FNV_OFFSET); payload is struct.pack("<qddddd?", ts_open, o, h, l,
+    c, v, synthesized) = 49 bytes. trade_count and is_forming are excluded."""
     h = prev if prev else _FNV_OFFSET
     payload = struct.pack("<qddddd?", bar.ts_open, bar.o, bar.h, bar.l, bar.c, bar.v, bar.synthesized)
     for byte in payload:
@@ -52,6 +58,7 @@ def bars_hash(prev: int, bar: T.NormalizedBar) -> int:
     return h
 
 def bars_hash_all(bars) -> int:
+    """Folds bars_hash over a sequence from the chain start (prev=0). Order-sensitive."""
     h = 0
     for b in bars:
         h = bars_hash(h, b)

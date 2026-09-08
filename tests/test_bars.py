@@ -11,6 +11,19 @@ def test_policy_constants_and_buckets():
     assert policy.bucket_start(1_577_836_800_000 + 899_999, "15") == 1_577_836_800_000
     assert policy.bucket_start(1_577_836_800_000 + 900_000, "15") == 1_577_837_700_000
 
+def test_weekly_buckets_are_monday_anchored():
+    # 2020-01-01T00:00:00Z is a Wednesday; the week's Monday is 2019-12-30T00:00:00Z.
+    ts = 1_577_836_800_000  # 2020-01-01T00:00:00Z
+    monday = 1_577_664_000_000  # 2019-12-30T00:00:00Z
+    assert policy.bucket_start(ts, "1W") == monday
+    assert policy.bucket_start(monday, "1W") == monday
+    assert policy.bucket_start(monday + 7 * 86_400_000 - 1, "1W") == monday
+
+def test_tf_ms_rejects_bad_input():
+    for bad in ("", "0", "abc", "1H", "M", "1M", "15m"):
+        with pytest.raises(ValueError):
+            policy.tf_ms(bad)
+
 def test_forming_bar_open_is_first_print():
     b = builder.FormingBarBuilder("15")
     t0 = 1_577_836_800_000

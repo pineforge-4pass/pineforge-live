@@ -1,4 +1,4 @@
-import dataclasses, hashlib, json
+import copy, dataclasses, pickle
 from pineforge_live import types as T
 from pineforge_live.adapters import base as B
 
@@ -10,6 +10,17 @@ def test_engine_syminfo_hash_is_canonical():
     b = dataclasses.replace(a, numeric_metadata={"a": 1.0, "b": 2.0}, string_metadata={"x": "0", "y": "1"})
     assert a.hash() == b.hash() and len(a.hash()) == 64
     assert dataclasses.replace(a, mintick=0.1).hash() != a.hash()
+
+def test_engine_syminfo_hash_unchanged_after_mutating_callers_dict():
+    numeric = {"a": 1.0}
+    a = T.EngineSyminfo(ticker="ETHUSDT.P", tickerid="BINANCE:ETHUSDT.P", prefix="BINANCE", root="ETHUSDT", type="crypto",
+                        currency="USDT", basecurrency="ETH", mintick=0.01, pricescale=100, pointvalue=1.0, minmove=1,
+                        session="24x7", timezone="UTC", volumetype="base", description="ETH perp",
+                        numeric_metadata=numeric, string_metadata={})
+    before = a.hash()
+    numeric["z"] = 9.0  # mutate the caller's original dict, not a's copy
+    assert a.hash() == before
+    assert a.numeric_metadata == {"a": 1.0}
 
 def test_order_action_is_frozen_and_complete():
     act = T.OrderAction(client_id="pfl-abc", intent_key="Long|ENTRY||1", level_version=0, action_seq=1,
@@ -26,6 +37,17 @@ def test_adapter_error_raises():
         assert e.retryable is True and e.reason_class is T.ReasonClass.RETRYABLE and str(e) == "RETRYABLE: x"
     else:
         raise AssertionError("AdapterError was not raised/caught")
+
+def test_adapter_error_pickle_and_deepcopy_round_trip():
+    # Same-process round-trip of a value we just created (not untrusted input) —
+    # exercises the __reduce__ fix that makes AdapterError picklable/deep-copyable.
+    e = T.AdapterError(True, 100, T.ReasonClass.RETRYABLE, "boom")
+    for got in (pickle.loads(pickle.dumps(e)), copy.deepcopy(e)):
+        assert got == e
+        assert (got.retryable, got.retry_after_ms, got.reason_class, got.message) == (True, 100, T.ReasonClass.RETRYABLE, "boom")
+
+def test_canonical_sha256_enum_matches_its_value():
+    assert T.canonical_sha256({"m": T.MarketType.SPOT}) == T.canonical_sha256({"m": "spot"})
 
 def test_protocols_are_runtime_checkable():
     class FakeClock:

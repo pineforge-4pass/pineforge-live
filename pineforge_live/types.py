@@ -2,7 +2,7 @@
 from __future__ import annotations
 import enum, hashlib, json
 from dataclasses import dataclass, field, asdict
-from typing import Literal, Union
+from typing import Union
 
 class MarketType(enum.Enum):
     SPOT = "spot"; PERP = "perp"; FUTURE = "future"
@@ -28,8 +28,13 @@ class StopDisposition(enum.Enum):
 
 TERMINAL_STATUSES = frozenset({OrderStatus.FILLED, OrderStatus.CANCELED, OrderStatus.EXPIRED, OrderStatus.REJECTED})
 
+def _canon(o):
+    if isinstance(o, enum.Enum):
+        return o.value
+    raise TypeError(f"canonical_sha256: no canonical encoding for {type(o).__name__}")
+
 def canonical_sha256(obj) -> str:
-    return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(obj, sort_keys=True, separators=(",", ":"), default=_canon).encode()).hexdigest()
 
 @dataclass(frozen=True)
 class InstrumentId:
@@ -43,6 +48,12 @@ class EngineSyminfo:
     volumetype: str; description: str
     numeric_metadata: dict[str, float] = field(default_factory=dict)
     string_metadata: dict[str, str] = field(default_factory=dict)
+    def __post_init__(self):
+        # Defensive copies: freezing is shallow, so without this the caller's dict
+        # can be mutated after construction and silently change .hash(). Plain
+        # dict copies (not MappingProxyType — that breaks asdict()/pickling).
+        object.__setattr__(self, "numeric_metadata", dict(self.numeric_metadata))
+        object.__setattr__(self, "string_metadata", dict(self.string_metadata))
     def hash(self) -> str: return canonical_sha256(asdict(self))
 
 @dataclass(frozen=True)
@@ -51,7 +62,7 @@ class VenueConstraints:
     price_bands: tuple[float, float]; stop_price_bands: tuple[float, float]; max_open_orders: int
     max_open_conditional_orders: int; position_modes: tuple[str, ...]; leverage: int; margin_modes: tuple[str, ...]
     conditional_order_types: tuple[str, ...]; close_position_supported: bool; reduce_only_min_notional_exempt: bool
-    trigger_bases: tuple[str, ...]; order_lookup_retention_ms: int; client_id_on_fills: bool
+    trigger_bases: tuple[TriggerBasis, ...]; order_lookup_retention_ms: int; client_id_on_fills: bool
     orders_per_10s: int; request_weight_per_min: int
     maintenance_margin_tiers: tuple[tuple[float, float, float], ...] = ()   # (notional_cap, mmr, maintenance_amount)
 
@@ -125,7 +136,21 @@ TickEvent = Union[Tick, TickGap]
 @dataclass(frozen=True)
 class AdapterError(Exception):
     retryable: bool; retry_after_ms: int; reason_class: ReasonClass; message: str = ""
-    def __str__(self) -> str: return f"{self.reason_class.value}: {self.message}"
+    def __str__(self) -> str:
+        return self.reason_class.value if not self.message else f"{self.reason_class.value}: {self.message}"
+    def __reduce__(self):
+        # BaseException.__reduce__ restores state via setattr, which a frozen
+        # dataclass forbids (FrozenInstanceError). Reconstruct via __init__ instead
+        # so pickle/copy.deepcopy round-trip cleanly.
+        return (type(self), (self.retryable, self.retry_after_ms, self.reason_class, self.message))
+    def add_note(self, note: str) -> None:
+        # BaseException.add_note() assigns self.__notes__ via normal attribute
+        # set, which frozen dataclasses block for every attribute. __notes__ is
+        # not a dataclass field, so bypassing __setattr__ here is safe and does
+        # not weaken field immutability.
+        notes = list(getattr(self, "__notes__", ()))
+        notes.append(note)
+        object.__setattr__(self, "__notes__", notes)
 
 @dataclass(frozen=True)
 class Capabilities:
