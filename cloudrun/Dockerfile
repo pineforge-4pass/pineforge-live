@@ -16,7 +16,7 @@ RUN ln -s /usr/include/eigen3/Eigen /usr/include/Eigen \
     && chown runner:runner /app /workspace
 WORKDIR /app
 COPY --chown=runner:runner pineforge_live /app/pineforge_live
-COPY --chown=runner:runner LICENSE pyproject.toml /app/
+COPY --chown=runner:runner LICENSE NOTICE pyproject.toml /app/
 ENV PYTHONPATH=/app PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     PINEFORGE_LIVE_BUILD_COMMIT=${LIVE_COMMIT} \
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \

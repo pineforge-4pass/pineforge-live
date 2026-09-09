@@ -1,0 +1,7 @@
+include LICENSE NOTICE README.md ledger.md
+recursive-include docs *.md *.json
+recursive-include examples *.py *.json
+recursive-include scripts *.py *.sh *.mjs
+recursive-include tests *.py *.mjs
+recursive-include cloudrun *.py *.md *.yaml Dockerfile
+global-exclude __pycache__ *.py[cod]

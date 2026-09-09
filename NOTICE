@@ -1,0 +1,13 @@
+PineForge Live
+Copyright 2026 PineForge contributors
+
+This product includes software developed for the PineForge project.
+
+The Python C ABI declarations in pineforge_live/engine/abi.py adapt the
+pineforge.h field layouts from PineForge Engine, licensed under Apache-2.0.
+PineForge Engine
+Copyright 2026 PineForge contributors
+https://github.com/pineforge-4pass/pineforge-engine
+
+The separately distributed C++ engine, compiler and their dependencies are
+not bundled in this Python package and retain their own license notices.

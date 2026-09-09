@@ -116,11 +116,11 @@ def live_context(repo: Path, commit: str, destination: Path) -> None:
         raise ValueError("image context destination must be new")
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise ValueError("live commit must be a full hash")
-    # Git archive outputs only the four named tracked paths, never .git or .env.
+    # Archive only the allowlisted source/metadata paths, never .git or .env.
     destination.mkdir(parents=True)
     archive = destination / "context.tar"
     _git(repo, "archive", "--format=tar", f"--output={archive}", commit, "--",
-         "pineforge_live", "cloudrun", "LICENSE", "pyproject.toml")
+         "pineforge_live", "cloudrun", "LICENSE", "NOTICE", "pyproject.toml")
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from pineforge_live.verification.cloud_io import safe_extract_tar
     safe_extract_tar(archive, destination / "context")

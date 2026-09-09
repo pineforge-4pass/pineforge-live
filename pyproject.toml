@@ -1,15 +1,24 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pineforge-live"
 version = "0.1.0"
-description = "Live runtime whose ledger is the PineForge backtest (spec 2026-09-07)"
+description = "Broker-neutral PineForge strategy runtime with tick/bar feeds and durable webhooks"
 readme = "README.md"
-license = {file = "LICENSE"}
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.12"
 dependencies = []
+keywords = ["pineforge", "pinescript", "trading", "webhooks"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

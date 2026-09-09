@@ -39,7 +39,7 @@ meta, inputs and feed digests. Never reconstruct the scientific feed CSV from
 Postgres `feed_bars`; use the content-addressed original bytes.
 
 The optional image context contains only the live commit's `pineforge_live/`,
-`cloudrun/`, `LICENSE` and `pyproject.toml`. It deliberately excludes `.git`,
+`cloudrun/`, `LICENSE`, `NOTICE` and `pyproject.toml`. It deliberately excludes `.git`,
 credentials, untracked local files, journals, build artifacts and test tapes.
 The adjacent context identity document binds the context to the reviewed live
 commit and archive digest. Upload packets as immutable `sha256/<sha>` objects
