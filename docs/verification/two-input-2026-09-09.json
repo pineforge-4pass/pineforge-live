@@ -1,0 +1,1822 @@
+{
+  "schemaVersion": "pineforge-live-public-verification/v1",
+  "scope": "bounded settled live-vs-C++-batch equivalence on identical reconstructed script bars; not a campaign grade/gate or broker-fill proof",
+  "codeCommit": "8356c15aebf19dcb88427baf709b237e31b5744e",
+  "imageDigest": "sha256:a8ed3eb03cf87ae645e98e1f199d363b90a446de1a5e4bc43102d7bdb20ff480",
+  "runId": "two-input-20260909-a7",
+  "manifest": {
+    "sha256": "8764059fee535c8dfd509f3a28b81e4eb3d6e63c5a7f6ecefa2dd17f9e72daa0",
+    "bytes": 3748
+  },
+  "execution": "pineforge-live-review-two-input-20260909-a7-4tgrv",
+  "completedAt": "2026-09-09T02:48:31.634424Z",
+  "sourceCommits": {
+    "codegen": "0fe2189f2cb845cc7371ce56dd55ad9cff72dda0",
+    "engine": "399eeadaa34cdbae0e30829f0a6c1dbe900cdfa0",
+    "lab": "3bac0b7bfa78dc66edb2d93b1d94b222f6e40cb8"
+  },
+  "selection": {
+    "population": 4190,
+    "selected": 35,
+    "method": "two per lane/group, seeded20260909, plus SMA/bracket/POOC probes",
+    "probePacket": {
+      "bytes": 1571607,
+      "manifestSha256": "e85fd1ab322e5a50a5a729037e67b74c59fbcb8249053673cb2733bb6439db01",
+      "sha256": "058311735669f7714e301b6fc404263dcd1b6fd5d4f50a9d8237ad09dc89835d"
+    }
+  },
+  "inputGapPolicy": "observed",
+  "tickPolicies": [
+    "high-first",
+    "low-first"
+  ],
+  "localTests": {
+    "passed": 950,
+    "skippedEngineFixtures": 151
+  },
+  "review": {
+    "provider": "Grok",
+    "verdict": "GREEN",
+    "P0": 0,
+    "P1": 0,
+    "P2": 0,
+    "codeCommit": "8356c15aebf19dcb88427baf709b237e31b5744e"
+  },
+  "summary": {
+    "probes": 35,
+    "passed": 35,
+    "failed": 0,
+    "unmeasured": 0,
+    "feedVariants": 105,
+    "caseArtifactsVerified": 35,
+    "receivedEventListsVerified": 105,
+    "calendarProvenanceVerifiedCases": 35,
+    "actionsByMode": {
+      "bars-direct": 67,
+      "ticks-high-first": 67,
+      "ticks-low-first": 67
+    },
+    "tickEventsByMode": {
+      "bars-direct": 0,
+      "ticks-high-first": 122092,
+      "ticks-low-first": 122092
+    },
+    "httpOrderActionDeliveries": 201,
+    "restartDeliveries": 0,
+    "duplicateEventIds": 0,
+    "nativeChartMatches": 27,
+    "nativeChartDifferences": 8
+  },
+  "probes": [
+    {
+      "probeId": "scrapper:data-NASDAQ-AAPL/standard/harshshodhan59-w-m-pattern-3-peaks-rr-tool",
+      "symbol": "NASDAQ:AAPL",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "7ecd8ef07b3978acae0b4432d6f10248c51a213278b236ed206245e63a88e5ee",
+      "caseArtifact": {
+        "bytes": 615287,
+        "generation": "1788921377319423",
+        "key": "live-verification/two-input-20260909-a7/0/case-0.tar.gz",
+        "readback_verified": true,
+        "sha256": "632e8af6b94be67d98391fd5f6acbacf911b9ea2842faa9ca0960aea84d1caed",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/0/case-0.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 379,
+      "replayBars": 16,
+      "firstInputMinute": 1621530900000,
+      "lastInputMinute": 1621608240000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1619789400000,
+      "effectiveChartStartMs": 1619789400000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "2847557f2771b0c506962cbf84673653589c85105af694406b89a875c7e3ba39",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 3,
+          "tickEvents": 0,
+          "receivedSha256": "5c7f7d891bf205d1659626d66bcb6ea5b264ff76b2e7b0e8585900586d565a65",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 3,
+          "tickEvents": 960,
+          "receivedSha256": "3a8028424ab86766b35169e8b576bf48375bbf555e8ff32053c972b07e0cb9bb",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 3,
+          "tickEvents": 960,
+          "receivedSha256": "a0f5971c8d9ab85937d47a2f53b35d805061ff32de11fd3496a59c96f3d5b5df",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-NASDAQ-AAPL/standard/rsantanabooking-simple-breakout-strategy-santana",
+      "symbol": "NASDAQ:AAPL",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "3d2e8cb4f241350f7f18b239aa0deee77f22d5e634264fab5e9617109a783c95",
+      "caseArtifact": {
+        "bytes": 682938,
+        "generation": "1788921379255777",
+        "key": "live-verification/two-input-20260909-a7/1/case-0.tar.gz",
+        "readback_verified": true,
+        "sha256": "e5e8fa285cd992d869ea2a793bdb44581bdd74508d27c19a22d78428139e618b",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/1/case-0.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 36,
+      "replayBars": 16,
+      "firstInputMinute": 1620057600000,
+      "lastInputMinute": 1620071940000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1619789400000,
+      "effectiveChartStartMs": 1619789400000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "2847557f2771b0c506962cbf84673653589c85105af694406b89a875c7e3ba39",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "ec9775fd0b84a4df710097ae2098a763f28fc614feb23a251df0eee825d62ff5",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "d291dc4f742612ea42b97ad276c7f0cabaa9b4af386953667dce543a1c474c6d",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "5a14039f60b689397062207969066a64b75655da552eeed0550bd4582d73c10b",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-BINANCE-BTCUSDT/standard/fattyguinness-the-mean-goose-v1",
+      "symbol": "BINANCE:BTCUSDT",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "99151b5ce24d316a3489819aad927cc66ee5b7e83d5689229cae7b9c3c462612",
+      "caseArtifact": {
+        "bytes": 3162724,
+        "generation": "1788921419325410",
+        "key": "live-verification/two-input-20260909-a7/2/case-0.tar.gz",
+        "readback_verified": true,
+        "sha256": "0fc6520b0831e8a662901ce0ac679e293bc5462dce1f19dbd140e3d3530e6c4f",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/2/case-0.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 3803,
+      "replayBars": 16,
+      "firstInputMinute": 1623249900000,
+      "lastInputMinute": 1623264240000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1619827200000,
+      "effectiveChartStartMs": 1619827200000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "5fbf8a29d2f538daee8fc69548f5f6a53ac31bc7b60d760b6d2edd56c06214a3",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 4,
+          "tickEvents": 0,
+          "receivedSha256": "c90031d732b2d667df332d0e6fa3e6b11cf97f999e8c051322fa9e6c56d8968f",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 4,
+          "tickEvents": 960,
+          "receivedSha256": "52c8fa04c924e3d21bc58112d40a5962f5621c31a789889df7343fa56674c3f3",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 4,
+          "tickEvents": 960,
+          "receivedSha256": "9d5e9e37258a484a21a80fe23cb09e41fb3f66a89b9f548500998b7ba663df9a",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-BINANCE-BTCUSDT/standard/artificialintelligencealgo-algoai-swing-point-reversal-hunter",
+      "symbol": "BINANCE:BTCUSDT",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "d0dc4a79be46dda16166637135e10249aee508843a6beb3017d5dba3e35bf8bf",
+      "caseArtifact": {
+        "bytes": 3029840,
+        "generation": "1788921412883385",
+        "key": "live-verification/two-input-20260909-a7/3/case-0.tar.gz",
+        "readback_verified": true,
+        "sha256": "cdb1db347664565bcaff94d2ecfa65a7dd9596016b59f9b065a3863329ddf1e9",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/3/case-0.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 1230,
+      "replayBars": 16,
+      "firstInputMinute": 1620934200000,
+      "lastInputMinute": 1620948540000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1619827200000,
+      "effectiveChartStartMs": 1619827200000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "5fbf8a29d2f538daee8fc69548f5f6a53ac31bc7b60d760b6d2edd56c06214a3",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "51b2bce38e73611daa55842ec70cfeec49e9a4ce46b4abed975fc4067c625f6d",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "2b73877523dfc1f329a67e6857632f10e8717d7604d16bb57551d74ce1675c84",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "67d05ff914e1c4e0f187357457359b86568b3f3be7364cb696c671a8099ec239",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-BINANCE-BTCUSDT-1D/standard/jenmb-sma-standard-deviation-for-entry-and-tp-2-exit-ema-tp3-exit",
+      "symbol": "BINANCE:BTCUSDT",
+      "scriptTf": "1D",
+      "status": "passed",
+      "sourceSha256": "802963b2f5ce531b4c3ce10ecd7e447e184149778da2487afa88bf38f9735aad",
+      "caseArtifact": {
+        "bytes": 61611,
+        "generation": "1788921433219812",
+        "key": "live-verification/two-input-20260909-a7/0/case-1.tar.gz",
+        "readback_verified": true,
+        "sha256": "a229aad595532559e3da664f87f221a45f438e7745199ec57829e3905d198139",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/0/case-1.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 45,
+      "replayBars": 2,
+      "firstInputMinute": 1623715200000,
+      "lastInputMinute": 1623887940000,
+      "positiveVolumeMinutes": 2880,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1619827200000,
+      "effectiveChartStartMs": 1619827200000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "686973a7972db9ec74c6898a40a50830fde7960792db04969c2c9483bda90db2",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "84adf76e6f24ffb460ed4de439ede7fa4bd1da48b9f183f4ffc68697fae23bbf",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 11520,
+          "receivedSha256": "2094ce5877fea5ff91e88675eac6871f992ab9f4de8c6a764ab70b22c1ca558a",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 11520,
+          "receivedSha256": "849407a607900b99b9c023707c9886aa9cefc2b0b4b66d4a3c1559147ccc2228",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-BINANCE-BTCUSDT-1D/standard/harshshodhan59-w-m-pattern-3-peaks-rr-tool",
+      "symbol": "BINANCE:BTCUSDT",
+      "scriptTf": "1D",
+      "status": "passed",
+      "sourceSha256": "7ecd8ef07b3978acae0b4432d6f10248c51a213278b236ed206245e63a88e5ee",
+      "caseArtifact": {
+        "bytes": 53293,
+        "generation": "1788921441718770",
+        "key": "live-verification/two-input-20260909-a7/1/case-1.tar.gz",
+        "readback_verified": true,
+        "sha256": "7acdc0d2db483999a764545d595bf4d6eb8e42597afb1351f7cceb18f66ba87a",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/1/case-1.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 51,
+      "replayBars": 2,
+      "firstInputMinute": 1624233600000,
+      "lastInputMinute": 1624406340000,
+      "positiveVolumeMinutes": 2880,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1619827200000,
+      "effectiveChartStartMs": 1619827200000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "686973a7972db9ec74c6898a40a50830fde7960792db04969c2c9483bda90db2",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 1,
+          "tickEvents": 0,
+          "receivedSha256": "1d458d5bc5dcacd5ff0f13e952ba94cb89fc763afe9e4c9daae6fceca47b589b",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 1,
+          "tickEvents": 11520,
+          "receivedSha256": "56c8c301d9bb6cddda2abbff5f98292646409ecfbab07b9d7606971f9508e99f",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 1,
+          "tickEvents": 11520,
+          "receivedSha256": "f9e7fb79f7d7c910c734b6b5aada07864524d79c5cfc7272123320aa79cd84b9",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-CME_MINI-ES1/standard/van007trader-vwap-deviation-score-dyna",
+      "symbol": "CME_MINI:ES1!",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "5d835acc1544a393704bdb0560a26af885678f2bf7d6a258901655de9b7c1d83",
+      "caseArtifact": {
+        "bytes": 1156574,
+        "generation": "1788921453152642",
+        "key": "live-verification/two-input-20260909-a7/2/case-1.tar.gz",
+        "readback_verified": true,
+        "sha256": "8659f57af692a9c7c16ab4b8d5547f4b62ae15949166f76ccafced0c3d1d5b91",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/2/case-1.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 476,
+      "replayBars": 16,
+      "firstInputMinute": 1693790100000,
+      "lastInputMinute": 1693804440000,
+      "positiveVolumeMinutes": 237,
+      "unsuppliedMinuteSlots": 3,
+      "originalChartStartMs": 1619992800000,
+      "effectiveChartStartMs": 1692994500000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "64763590cf9dfdb7c031eea1feb54dd80952f3769caf9221f4b3072cd03f0c15",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "7759868eacad5dfe79f39bcd297d1bcaa39c0975169759707dce312e9160e927",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 948,
+          "receivedSha256": "4cf1e00b141198a96957ade7bd47dccfa0f8fa78abf203294e7a0cad7cbbcbe7",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 948,
+          "receivedSha256": "fd9163f64163fac5419db935d5cebc426da6fb80d80263fb91e50b9f728dcc45",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-CME_MINI-ES1/standard/crypto-imperija-adaptive-atr-trend-bands",
+      "symbol": "CME_MINI:ES1!",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "77d3c024f956ddbd96ede3867e0ea471c7531c6d550b36da240cdaecfc609526",
+      "caseArtifact": {
+        "bytes": 1288342,
+        "generation": "1788921460467408",
+        "key": "live-verification/two-input-20260909-a7/3/case-1.tar.gz",
+        "readback_verified": true,
+        "sha256": "b04a2cacf187e68d427124866bb1e307a3f13e3cbb8fa5c067df8f6219c09843",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/3/case-1.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 866,
+      "replayBars": 16,
+      "firstInputMinute": 1694169900000,
+      "lastInputMinute": 1694184240000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1619992800000,
+      "effectiveChartStartMs": 1692994500000,
+      "auxiliaryRequired": true,
+      "calendarSha256": "64763590cf9dfdb7c031eea1feb54dd80952f3769caf9221f4b3072cd03f0c15",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "8870304fb31eabcb58666c262af11ec3c0d99fc57cc5d6628d563acb3c87c381",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "a02c6cd88f640033e1e9c4dc42194dcbe70fc7a90e8317c49ec7254b308e0bb8",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "5071d3be00aca2072e29dbd35898675f63d8b30bf5a887659b9c31c61ff691b5",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-CME_MINI-ES1-1D/standard/shiroi-volatility-surge-strategy",
+      "symbol": "CME_MINI:ES1!",
+      "scriptTf": "1D",
+      "status": "passed",
+      "sourceSha256": "fe618132e48f738257641346fb85c5c0c300b363200ff6ad65261cd4685529fa",
+      "caseArtifact": {
+        "bytes": 34120,
+        "generation": "1788921479270101",
+        "key": "live-verification/two-input-20260909-a7/0/case-2.tar.gz",
+        "readback_verified": true,
+        "sha256": "907358b82df8fbcdaa8131b06259c6fda65bffb8186c63e65c295c1941c67e1b",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/0/case-2.tar.gz"
+      },
+      "nativeChartEqual": false,
+      "historyBars": 93,
+      "replayBars": 2,
+      "firstInputMinute": 1704841200000,
+      "lastInputMinute": 1705010340000,
+      "positiveVolumeMinutes": 2759,
+      "unsuppliedMinuteSlots": 1,
+      "originalChartStartMs": 1619992800000,
+      "effectiveChartStartMs": 1693173600000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "08a1f7575596ca0fdba8030ce36105f11e120f91c40d29d3537b88889a66f74a",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 1,
+          "tickEvents": 0,
+          "receivedSha256": "be4417114ea0cde5faf94a9ddefc4363dba8f1e4b77e2b054a14561996d13e13",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 1,
+          "tickEvents": 11036,
+          "receivedSha256": "d95bdca38aa669c50b5713cc3571bfc9babab0f1c1122a510130ce718846609c",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 1,
+          "tickEvents": 11036,
+          "receivedSha256": "9b881c690089bd92bc500548c9aed17faa1b7370793bdad66369e6c1380d9a0f",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-CME_MINI-ES1-1D/standard/options7700-2min-bullish-confluence",
+      "symbol": "CME_MINI:ES1!",
+      "scriptTf": "1D",
+      "status": "passed",
+      "sourceSha256": "7d08eda6b66d63df37138cf0ca15204dd8023d606c7e6c19c11ef17f3d312c56",
+      "caseArtifact": {
+        "bytes": 83156,
+        "generation": "1788921514074395",
+        "key": "live-verification/two-input-20260909-a7/1/case-2.tar.gz",
+        "readback_verified": true,
+        "sha256": "7bd6f26d5864405024abd84dd6262dc24cc0f19e3cccd0a1e5b0312b5120fc02",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/1/case-2.tar.gz"
+      },
+      "nativeChartEqual": false,
+      "historyBars": 3,
+      "replayBars": 2,
+      "firstInputMinute": 1693432800000,
+      "lastInputMinute": 1693601940000,
+      "positiveVolumeMinutes": 2755,
+      "unsuppliedMinuteSlots": 5,
+      "originalChartStartMs": 1619992800000,
+      "effectiveChartStartMs": 1693173600000,
+      "auxiliaryRequired": true,
+      "calendarSha256": "08a1f7575596ca0fdba8030ce36105f11e120f91c40d29d3537b88889a66f74a",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 1,
+          "tickEvents": 0,
+          "receivedSha256": "054dfc9816bdb9f804d141c222244385bad64b2981eff7c24516efd01688e171",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 1,
+          "tickEvents": 11020,
+          "receivedSha256": "cc05dbb016a31cc22ae02656a429b5c5db0a062cc07d0fe7bfeb8aaea428fd07",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 1,
+          "tickEvents": 11020,
+          "receivedSha256": "ab9f26742159c94edf02a7a4ba535052c371ff4e5b8d92fe991e4d015d001c75",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "corpus:corpus/validation/ta-stdev-sma-expansion-break-01",
+      "symbol": "BINANCE:ETHUSDT.P",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "3695ec5e7772ed869975aea5f749552116217082924617ba642b304a1657e90b",
+      "caseArtifact": {
+        "bytes": 4141096,
+        "generation": "1788921549559805",
+        "key": "live-verification/two-input-20260909-a7/2/case-2.tar.gz",
+        "readback_verified": true,
+        "sha256": "dc229c495be2e19b04f2eacb944e41fd88d800a98fe8c22ed613af7e4cbb80b5",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/2/case-2.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 74,
+      "replayBars": 16,
+      "firstInputMinute": 1577903400000,
+      "lastInputMinute": 1577917740000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1577836800000,
+      "effectiveChartStartMs": 1577836800000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "badb51c67b7c1f822cd87e7ec2e5add6b19bb5ceda95de1b30fd609f76624b58",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "06f768fcbede972b7fea1ea8a5db4e30f805e7e1b30ba970880a4a6602434965",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "c5f671133ff357f69811de11284b32bb8f28f75dc8efef734d97de52b9c99d88",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "0fc10285596bd4d3e5d61ba4ae3ed825f124ccaf68e1aa128e1119fe79733640",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "corpus:corpus/validation/cap-gatekeeper-intraday-risk-01",
+      "symbol": "BINANCE:ETHUSDT.P",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "f41e854bd7a086f5893e5a9d53545cbe9fd395a2e768adf7f342034a001ca350",
+      "caseArtifact": {
+        "bytes": 3953896,
+        "generation": "1788921533389511",
+        "key": "live-verification/two-input-20260909-a7/3/case-2.tar.gz",
+        "readback_verified": true,
+        "sha256": "ff6e1ad0728ab25bab9a801d71e471445dc9c67b6577176fa03c3536e0609424",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/3/case-2.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 197,
+      "replayBars": 16,
+      "firstInputMinute": 1578014100000,
+      "lastInputMinute": 1578028440000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1577836800000,
+      "effectiveChartStartMs": 1577836800000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "badb51c67b7c1f822cd87e7ec2e5add6b19bb5ceda95de1b30fd609f76624b58",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "ba64eb373aca6561a34f4dca0753d3f2bd7bd9aba8b914f7211752962d35e47c",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "4762820f9c9e74c583177db344ad5c3bf897d50fffa57da2d109dab28915576d",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "c318a26476c75789136bfabf5d0ce5fc059b54a193ad55a4a0ac807bfc47eabd",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data/standard/officialjackofalltrades-concordance-regime-synthesis-joat",
+      "symbol": "BINANCE:ETHUSDT.P",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "b38e4f84cc8d77367d2ac0e78fc5933723bae32719a6ec008b70f22ff39ccb6a",
+      "caseArtifact": {
+        "bytes": 7242974,
+        "generation": "1788921857460965",
+        "key": "live-verification/two-input-20260909-a7/0/case-3.tar.gz",
+        "readback_verified": true,
+        "sha256": "7c496e819eb988f8f11e6f5ab58187962125373266d1a9d25e6438a7ecd4044a",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/0/case-3.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 40,
+      "replayBars": 16,
+      "firstInputMinute": 1577872800000,
+      "lastInputMinute": 1577887140000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1577836800000,
+      "effectiveChartStartMs": 1577836800000,
+      "auxiliaryRequired": true,
+      "calendarSha256": "badb51c67b7c1f822cd87e7ec2e5add6b19bb5ceda95de1b30fd609f76624b58",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "67b9bdda8eedffc3cfb194ace79695c6e31d32ec60cb227e39b9df5364511ced",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "1ce48d9b027a7917e35b060e88d8aeeade1076bd97563234f1ef03c61355015f",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "bad2623f77428193f158b6e3ff6495a6289de4fdd9ce991572f74d852dfba310",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data/standard/oscar-lab-mtf-smc-signal-v2-ready-fire-confluence-score",
+      "symbol": "BINANCE:ETHUSDT.P",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "8ebd0eea8712baf0cfb545825e235a1b94288a0708ffe4bac32b7c454be2e245",
+      "caseArtifact": {
+        "bytes": 4011936,
+        "generation": "1788921658289352",
+        "key": "live-verification/two-input-20260909-a7/1/case-3.tar.gz",
+        "readback_verified": true,
+        "sha256": "a7328be1c1b9eeb6fa0bbef8436eb77ab20d3c33e4f1433030132ab10420674f",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/1/case-3.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 77,
+      "replayBars": 16,
+      "firstInputMinute": 1577906100000,
+      "lastInputMinute": 1577920440000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1577836800000,
+      "effectiveChartStartMs": 1577836800000,
+      "auxiliaryRequired": true,
+      "calendarSha256": "badb51c67b7c1f822cd87e7ec2e5add6b19bb5ceda95de1b30fd609f76624b58",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 1,
+          "tickEvents": 0,
+          "receivedSha256": "0fa9ddca126411867cd3a6c0bd068ba5ee8dcb027f7dd08387cb14398c82e375",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 1,
+          "tickEvents": 960,
+          "receivedSha256": "d4f2ec3fabc647be865e280f1980bab27b977108df59ff8231a6fefe5ee0876b",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 1,
+          "tickEvents": 960,
+          "receivedSha256": "11b01e6366d3bd3989b5e26096b28f1f765beb6309a9b1ecc830066364c43c3f",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-OANDA-EURUSD/standard/masayanfx-multi-time-score-strategy",
+      "symbol": "OANDA:EURUSD",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "6c5642f917547681c6d14a79b703e89c699eb0809d95da36f8dc0789211c8b84",
+      "caseArtifact": {
+        "bytes": 2293305,
+        "generation": "1788921639222139",
+        "key": "live-verification/two-input-20260909-a7/2/case-3.tar.gz",
+        "readback_verified": true,
+        "sha256": "32ddf98ab223c0f199d2dd8ad3eda50e8dec1c6af7c20155e82bc82fb8a2e941",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/2/case-3.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 139,
+      "replayBars": 16,
+      "firstInputMinute": 1620038700000,
+      "lastInputMinute": 1620053040000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1619740800000,
+      "effectiveChartStartMs": 1619740800000,
+      "auxiliaryRequired": true,
+      "calendarSha256": "5483b3be7fb0cbea988ed886405715704b78169940f4d071a8e2a0665ac999e7",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 1,
+          "tickEvents": 0,
+          "receivedSha256": "4007c3fd0d93c3b60d4e8e7882ac54473ed29f2d16d021647327e74068cd8ba9",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 1,
+          "tickEvents": 960,
+          "receivedSha256": "13d8d5b7bdf73a86bc443aa5f5e1d1482cc25351043fe50d614f8853cb084191",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 1,
+          "tickEvents": 960,
+          "receivedSha256": "6e03f921b0e67e04e22eb0fd3d935f4ce4590b4e2a8ea8ca507d40742131472d",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-OANDA-EURUSD/standard/rumdopfstocks-btc-4h-rsi-bullish-engulfing",
+      "symbol": "OANDA:EURUSD",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "2b0a5062303b2eec859c3d97b4d85c5100d1cbba35d2d82940b012c247d8697a",
+      "caseArtifact": {
+        "bytes": 2201308,
+        "generation": "1788921571118975",
+        "key": "live-verification/two-input-20260909-a7/3/case-3.tar.gz",
+        "readback_verified": true,
+        "sha256": "d9287fdba26d2e68df63806987bb63a8140986bd45f5319181de19114d968f8c",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/3/case-3.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 523,
+      "replayBars": 16,
+      "firstInputMinute": 1620384300000,
+      "lastInputMinute": 1620398640000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1619740800000,
+      "effectiveChartStartMs": 1619740800000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "5483b3be7fb0cbea988ed886405715704b78169940f4d071a8e2a0665ac999e7",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 1,
+          "tickEvents": 0,
+          "receivedSha256": "bc40ac4b613ee28607d33e32d90e36f186749047bfe754a1fa0d8d4a9fa3cfa1",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 1,
+          "tickEvents": 960,
+          "receivedSha256": "1b36bafb692fbbff0afdf759f0c03e91cb884d4e6e02be4069241fc4206ed06c",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 1,
+          "tickEvents": 960,
+          "receivedSha256": "a62cacd5c13595998164f8fb8bdf30b75641ecc4dcaecdeb89abafb1ca8b1bf3",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-NYSE-F/standard/rupasgavane-hemant-gold-strategy",
+      "symbol": "NYSE:F",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "0ab1deb9c015ae9f33d036f5a21f7d5710fb4a2bfddd98d5df85ae9e0d545f2e",
+      "caseArtifact": {
+        "bytes": 655391,
+        "generation": "1788921871630019",
+        "key": "live-verification/two-input-20260909-a7/0/case-4.tar.gz",
+        "readback_verified": true,
+        "sha256": "c50f240de0011dede900708a0522dbdaaf3796f178af092239f61ec6778b8e13",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/0/case-4.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 323,
+      "replayBars": 16,
+      "firstInputMinute": 1621440960000,
+      "lastInputMinute": 1621518240000,
+      "positiveVolumeMinutes": 217,
+      "unsuppliedMinuteSlots": 23,
+      "originalChartStartMs": 1620048600000,
+      "effectiveChartStartMs": 1620048600000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "92f2056daaf82866ecfcdd288c8be3649f695c147c8ffe03252b8ba45545b63c",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 1,
+          "tickEvents": 0,
+          "receivedSha256": "8b5431a07aff57b541a5db39c480cb441311e9fc733a72624164de0b268cc0a8",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 1,
+          "tickEvents": 868,
+          "receivedSha256": "3a07b61b9077e859c650a46410ab0df25386bf7a91e806cfddf5d0561b6886f0",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 1,
+          "tickEvents": 868,
+          "receivedSha256": "b6404f3e1fa4cefc7494d3a2338ad826b7750413f203104b019c5e7a2322bcac",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-NYSE-F/standard/neurodoc-cascade-dca-spot-long-strategy",
+      "symbol": "NYSE:F",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "2c5acd95ccc4497c6e5e0fc4b7503b4ea47563e11826ee8d4053d313f96bf107",
+      "caseArtifact": {
+        "bytes": 641403,
+        "generation": "1788921677933609",
+        "key": "live-verification/two-input-20260909-a7/1/case-4.tar.gz",
+        "readback_verified": true,
+        "sha256": "f3b1bb866ce886bcc86ab3db1d171a3fe7efde5d11e70993d557f0665383132b",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/1/case-4.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 1944,
+      "replayBars": 16,
+      "firstInputMinute": 1629225000000,
+      "lastInputMinute": 1629302340000,
+      "positiveVolumeMinutes": 219,
+      "unsuppliedMinuteSlots": 21,
+      "originalChartStartMs": 1620048600000,
+      "effectiveChartStartMs": 1620048600000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "92f2056daaf82866ecfcdd288c8be3649f695c147c8ffe03252b8ba45545b63c",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 1,
+          "tickEvents": 0,
+          "receivedSha256": "c8ecf670949c92c7f83501d6684c001a3cdf1866b08c52b8920a3106b29cc461",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 1,
+          "tickEvents": 876,
+          "receivedSha256": "ad59f806071de306c17c9f5e627a9a12d17483d17c671a4fdea8fa2ec7070fdb",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 1,
+          "tickEvents": 876,
+          "receivedSha256": "cff2ba594556db18ca1410da147d37dec201e855df6b427b2d5b5c7fda97932a",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-NYSE-F-1D/standard/markittick-intra-candle-pressure-dissector-markittick",
+      "symbol": "NYSE:F",
+      "scriptTf": "1D",
+      "status": "passed",
+      "sourceSha256": "5fd82e6fdc2bc737f44ca682050e42bdb72c6567d12c5453fe19ff0a8ad305f8",
+      "caseArtifact": {
+        "bytes": 221425,
+        "generation": "1788921671997841",
+        "key": "live-verification/two-input-20260909-a7/2/case-4.tar.gz",
+        "readback_verified": true,
+        "sha256": "fa38cedb99227bc0cfc2a64f2799c42dcd8f91206d94df54ba16156412612967",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/2/case-4.tar.gz"
+      },
+      "nativeChartEqual": false,
+      "historyBars": 53,
+      "replayBars": 2,
+      "firstInputMinute": 1626701400000,
+      "lastInputMinute": 1626811140000,
+      "positiveVolumeMinutes": 728,
+      "unsuppliedMinuteSlots": 52,
+      "originalChartStartMs": 1620048600000,
+      "effectiveChartStartMs": 1620048600000,
+      "auxiliaryRequired": true,
+      "calendarSha256": "8f1b391da4d0edfe1fafa697e5bc3435b76cf4e734ba09de50b3d2044ad1dc66",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "06177584638a79e3147a6f73216cea8ca93d114c69f33b2bca3358e36b41cbad",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 2912,
+          "receivedSha256": "328de07bcd31b805e80ff6bab7acecf2296379076c553c11d81aa613dd85649b",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 2912,
+          "receivedSha256": "3dc17413b187574b9dead12ef54adcf959db3271b698477de2cd01738a52c77d",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-NYSE-F-1D/standard/cb85wj5jmt-moja-strategia-harami-bb",
+      "symbol": "NYSE:F",
+      "scriptTf": "1D",
+      "status": "passed",
+      "sourceSha256": "f014c1a783330f30920f7087c661b6dfb2b2cfdad2b7399c92095df68663a8b5",
+      "caseArtifact": {
+        "bytes": 46890,
+        "generation": "1788921587239940",
+        "key": "live-verification/two-input-20260909-a7/3/case-4.tar.gz",
+        "readback_verified": true,
+        "sha256": "57b2183364e64eade58b8ccb5ccc15ffbe6ddfe7d77e70e578e466ddcf512249",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/3/case-4.tar.gz"
+      },
+      "nativeChartEqual": false,
+      "historyBars": 67,
+      "replayBars": 2,
+      "firstInputMinute": 1628256600000,
+      "lastInputMinute": 1628539140000,
+      "positiveVolumeMinutes": 608,
+      "unsuppliedMinuteSlots": 172,
+      "originalChartStartMs": 1620048600000,
+      "effectiveChartStartMs": 1620048600000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "8f1b391da4d0edfe1fafa697e5bc3435b76cf4e734ba09de50b3d2044ad1dc66",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "11ccdd6108f4f4829d85eb001bed45684e7f4a8a66fd5a8b79b9372b2dcc52f9",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 2432,
+          "receivedSha256": "5595fc2213f3a241f011461c481cbd06cd2afe816eb034058fda7dc688a7b001",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 2432,
+          "receivedSha256": "ca69eb3c1a1dac3970addd6ef08af9de73fcc88e0a4b47812e6ce5b9491bda32",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-NSE-NIFTY/standard/klowdcossey99-my-strategy-9",
+      "symbol": "NSE:NIFTY",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "6fbba3ba28c244b03ee49a6c43a04f420ae64b2fda02fda243aae4b1854acd97",
+      "caseArtifact": {
+        "bytes": 926127,
+        "generation": "1788921898993940",
+        "key": "live-verification/two-input-20260909-a7/0/case-5.tar.gz",
+        "readback_verified": true,
+        "sha256": "ca6de225538216d800be664d2fce525f52be9b039548305cc5431b6a6492864a",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/0/case-5.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 1509,
+      "replayBars": 16,
+      "firstInputMinute": 1627452000000,
+      "lastInputMinute": 1627466340000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1620013500000,
+      "effectiveChartStartMs": 1620013500000,
+      "auxiliaryRequired": true,
+      "calendarSha256": "ee12bba2c455873f5670b2e06be3870a3042999309b3cdc183d95f4b88e73f2f",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "ed147f6edf9270e9457ea7f9f7c3f5963ef5ed08446a65caee1a008416174993",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "b111ae3c184d268d29584b70bf576c6d0801dc30da6469ebf352d5d5a396af9d",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "78e4a2d7bc701eaf4569215d0b4dbf29b156a91da7d52ddbf148d3e9de8db9d5",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-NSE-NIFTY/standard/roi10x-shiva-lt-ls-blend",
+      "symbol": "NSE:NIFTY",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "77690d208ae8dc82a1f10e11289999be959ed19a1d93826ad68b2e54e31e7d75",
+      "caseArtifact": {
+        "bytes": 996348,
+        "generation": "1788921729970714",
+        "key": "live-verification/two-input-20260909-a7/1/case-5.tar.gz",
+        "readback_verified": true,
+        "sha256": "041e5999b31757217d01c329002f96d635d2851c9ecbdc233ed046e9fc33e208",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/1/case-5.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 1497,
+      "replayBars": 16,
+      "firstInputMinute": 1627377300000,
+      "lastInputMinute": 1627455540000,
+      "positiveVolumeMinutes": 195,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1620013500000,
+      "effectiveChartStartMs": 1620013500000,
+      "auxiliaryRequired": true,
+      "calendarSha256": "ee12bba2c455873f5670b2e06be3870a3042999309b3cdc183d95f4b88e73f2f",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "76d1700200da58438d4a1f62938ed3070ee026bd5709a2da199493fad2829043",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 780,
+          "receivedSha256": "f5cc9696e2dca90c86e0b9726c42ca75a1c43e58a6383274f8c326a5def02109",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 780,
+          "receivedSha256": "1e3efdd2f01e46c7e197931b9d2995b3b9422f3c34fc8a8860e09aa9cc511f1c",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-NSE-NIFTY-1D/standard/taro-s-edvefi-standard-ma-version",
+      "symbol": "NSE:NIFTY",
+      "scriptTf": "1D",
+      "status": "passed",
+      "sourceSha256": "57123007ec0a8b33d788734abb4505e3ba8eaed741f96bf6fb2c46e0ef0f86ac",
+      "caseArtifact": {
+        "bytes": 59051,
+        "generation": "1788921689925106",
+        "key": "live-verification/two-input-20260909-a7/2/case-5.tar.gz",
+        "readback_verified": true,
+        "sha256": "fe6c0c6d49d20d49ada9bae55aa903258f244aef4cb375785a5250d753f1cf97",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/2/case-5.tar.gz"
+      },
+      "nativeChartEqual": false,
+      "historyBars": 61,
+      "replayBars": 2,
+      "firstInputMinute": 1627530300000,
+      "lastInputMinute": 1627639140000,
+      "positiveVolumeMinutes": 750,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1620013500000,
+      "effectiveChartStartMs": 1620013500000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "1cdfd0ce28d9fbab8a15ac47877b087f3e7d899dca36fca479af2ee09b6e3e8d",
+      "unknownClosingWindowsExcluded": 5,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "a415808ab3ecc3be460c3204f8fb2e3e388d6a55c226fd28606c74c9c5aa7096",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 3000,
+          "receivedSha256": "a3fb3820827c9927041f7c8d7efdc571bcef7f534c6e6e528c392fba4df54a9c",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 3000,
+          "receivedSha256": "37a191e1bab44be03bb5b6d1e13e8e7bb3031d09d8a21c0fe8835edb240cdd64",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-NSE-NIFTY-1D/standard/jaysharmaofficial-alphamojo-supertrend-strategy-ha-with-buffer",
+      "symbol": "NSE:NIFTY",
+      "scriptTf": "1D",
+      "status": "passed",
+      "sourceSha256": "7d4aead5bfd42d599bcb684190d343a2e23318b48bb6478f79ea069213f922aa",
+      "caseArtifact": {
+        "bytes": 48746,
+        "generation": "1788921604871044",
+        "key": "live-verification/two-input-20260909-a7/3/case-5.tar.gz",
+        "readback_verified": true,
+        "sha256": "c980175d3966e21f3e990b01d67442c72f8b71078639518667b3b8f433e7ab21",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/3/case-5.tar.gz"
+      },
+      "nativeChartEqual": false,
+      "historyBars": 138,
+      "replayBars": 2,
+      "firstInputMinute": 1637552700000,
+      "lastInputMinute": 1637661540000,
+      "positiveVolumeMinutes": 750,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1620013500000,
+      "effectiveChartStartMs": 1620013500000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "1cdfd0ce28d9fbab8a15ac47877b087f3e7d899dca36fca479af2ee09b6e3e8d",
+      "unknownClosingWindowsExcluded": 5,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "ae9492437edee978c879a57b2a286b1714d3cc819202adb175f30a1d3dc63a7d",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 3000,
+          "receivedSha256": "5b9e8afe01a12e9b578469f3f3abe1d2682b29545ec2b3f250b9b54d7b0064b9",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 3000,
+          "receivedSha256": "aa1861f44b10779c397f6fd50da303e438fe6743dbba814c63a053a524f14c19",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-CME_MINI-NQ1/standard/acalvillo20-amd1",
+      "symbol": "CME_MINI:NQ1!",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "3a511a3cb0ae87b6a63984742c46f93a5942584bc5ab9bfcd84a052951e7e4be",
+      "caseArtifact": {
+        "bytes": 1182357,
+        "generation": "1788921935509078",
+        "key": "live-verification/two-input-20260909-a7/0/case-6.tar.gz",
+        "readback_verified": true,
+        "sha256": "f82e24e9d3002af340504be0fd7cc9f4e334b191a7117e8b51e6b4ea62e953cc",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/0/case-6.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 142,
+      "replayBars": 16,
+      "firstInputMinute": 1693303200000,
+      "lastInputMinute": 1693317540000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1619992800000,
+      "effectiveChartStartMs": 1692995400000,
+      "auxiliaryRequired": true,
+      "calendarSha256": "bc79d7f23f5ad01d1c1466e4aafc0b5feff1fb8fef7e50c779dbc1f7c871749c",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "f1a0d0708c0471fe670ce9ee23a7eb33eafdf7353a5fd1d9a7cc7f4e792ff638",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "6cdb2c138964fb34fd7dc72cdab81731dade2ef1f5dfdf51c6ef16b108aef39f",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "04d5f1355aeb19825407e1f7d775b98a8480b2f2b03cef63a3ce3b9e3a10eaa2",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-CME_MINI-NQ1/standard/sadtrader9-fair-value-gap-strategy",
+      "symbol": "CME_MINI:NQ1!",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "f8cc6e223d07a0351266aee1e0341decb24d45af0f736559a898f82ef5bb1308",
+      "caseArtifact": {
+        "bytes": 1524613,
+        "generation": "1788921764262944",
+        "key": "live-verification/two-input-20260909-a7/1/case-6.tar.gz",
+        "readback_verified": true,
+        "sha256": "47f9160d48e26221a210c22b0ef4f4e3c75801932c8489d49a8ee5cfd1769e29",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/1/case-6.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 19,
+      "replayBars": 16,
+      "firstInputMinute": 1693188900000,
+      "lastInputMinute": 1693203240000,
+      "positiveVolumeMinutes": 239,
+      "unsuppliedMinuteSlots": 1,
+      "originalChartStartMs": 1619992800000,
+      "effectiveChartStartMs": 1692995400000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "bc79d7f23f5ad01d1c1466e4aafc0b5feff1fb8fef7e50c779dbc1f7c871749c",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "b7436b5ce62466f8d610c96d18feaf466037357abe8f16d1ad2deff0ea98f7a8",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 956,
+          "receivedSha256": "87950ebb0c6cc7d1050c34199ab2f333da6a2d367ad200f24efccb2c0cfb7793",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 956,
+          "receivedSha256": "e24f468a84a83d9f59e1b953bf23153a861e6b4b1526945f893a82ffb2722581",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-CME_MINI-NQ1-1D/standard/masayanfx-multi-time-score-strategy",
+      "symbol": "CME_MINI:NQ1!",
+      "scriptTf": "1D",
+      "status": "passed",
+      "sourceSha256": "6c5642f917547681c6d14a79b703e89c699eb0809d95da36f8dc0789211c8b84",
+      "caseArtifact": {
+        "bytes": 94697,
+        "generation": "1788921763783855",
+        "key": "live-verification/two-input-20260909-a7/2/case-6.tar.gz",
+        "readback_verified": true,
+        "sha256": "796941f3eb66cf8785eafcbe6b4886f38ed4ce819cc8c36c6c525b343498ea9d",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/2/case-6.tar.gz"
+      },
+      "nativeChartEqual": false,
+      "historyBars": 2,
+      "replayBars": 2,
+      "firstInputMinute": 1693346400000,
+      "lastInputMinute": 1693515540000,
+      "positiveVolumeMinutes": 2760,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1619992800000,
+      "effectiveChartStartMs": 1693173600000,
+      "auxiliaryRequired": true,
+      "calendarSha256": "08a1f7575596ca0fdba8030ce36105f11e120f91c40d29d3537b88889a66f74a",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "6b28a0c949ef81780f63b4bebde691bd98d8f9e4165c0da24403b27b30eaaab9",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 11040,
+          "receivedSha256": "c487ecc14112dee3c32738bde00d68b2bd3149d9f45d6221ebf43c37a01f4b47",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 11040,
+          "receivedSha256": "293b5b96870632e25d081d0c08c8623bc81f221abf9a8fd9dbefd4f3a1ef64fd",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-CME_MINI-NQ1-1D/standard/jonny-dow-opening-price-level-breakout",
+      "symbol": "CME_MINI:NQ1!",
+      "scriptTf": "1D",
+      "status": "passed",
+      "sourceSha256": "f7cfe8ca81241f3f09effae4cd534bb79f34afca7f6d31bddc98e389c1d373a1",
+      "caseArtifact": {
+        "bytes": 26885,
+        "generation": "1788921658885220",
+        "key": "live-verification/two-input-20260909-a7/3/case-6.tar.gz",
+        "readback_verified": true,
+        "sha256": "50d0f4d48cb12beafaa1d7438623d8ebcc3a49174f14def0c89371f9337153dc",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/3/case-6.tar.gz"
+      },
+      "nativeChartEqual": false,
+      "historyBars": 1,
+      "replayBars": 2,
+      "firstInputMinute": 1693260000000,
+      "lastInputMinute": 1693429140000,
+      "positiveVolumeMinutes": 2759,
+      "unsuppliedMinuteSlots": 1,
+      "originalChartStartMs": 1619992800000,
+      "effectiveChartStartMs": 1693173600000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "08a1f7575596ca0fdba8030ce36105f11e120f91c40d29d3537b88889a66f74a",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 1,
+          "tickEvents": 0,
+          "receivedSha256": "6a83b801819923cc5133dfee13d63c6d9405b0d5bd818dc9875bbc7496603e8e",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 1,
+          "tickEvents": 11036,
+          "receivedSha256": "a548fbd4538f99ac6ce4e8fce466cf1b30ed5d335eeaccb1dd0ec13746fa25a7",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 1,
+          "tickEvents": 11036,
+          "receivedSha256": "90f4f75824809b09079651f044e846cb59b9715da8480fd2183b5c525358cd54",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-OANDA-XAUUSD/standard/market-logic-india-low-lag-strength-oscillator",
+      "symbol": "OANDA:XAUUSD",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "5b5e08c3f89ef6d3d8bf21b0fe7a474551b711c50c7eb0e730a9d27f5259de95",
+      "caseArtifact": {
+        "bytes": 3430476,
+        "generation": "1788922029507721",
+        "key": "live-verification/two-input-20260909-a7/0/case-7.tar.gz",
+        "readback_verified": true,
+        "sha256": "2cba3fe47cb3265bb7b173c6b38db6ecd3c1d25b0559bf98c9897a57219247e5",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/0/case-7.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 42,
+      "replayBars": 16,
+      "firstInputMinute": 1620030600000,
+      "lastInputMinute": 1620044940000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1619992800000,
+      "effectiveChartStartMs": 1619992800000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "f9c799ab55940f65b058fd0c6a7f625de6342bc075de66024335112c6e06118e",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 3,
+          "tickEvents": 0,
+          "receivedSha256": "78cf5d740d66eba58393902c5c6dbb142e918ce9d964a451ff12c770a424dc73",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 3,
+          "tickEvents": 960,
+          "receivedSha256": "4383a4f3c2503df4c0ec577da4a92a0c99b1b2425cb91bc18638f5a09daaa5e7",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 3,
+          "tickEvents": 960,
+          "receivedSha256": "4326f67ea27322592e3ae614ae950326108c37dd13eb1a9584c34929d4cd85af",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-OANDA-XAUUSD/standard/strategylab-liquidity-dynamic-trend",
+      "symbol": "OANDA:XAUUSD",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "9a95a6ae7a6b87e9201c2c4e7ea3547f2fede823be75887cd7cf992b408e2f9a",
+      "caseArtifact": {
+        "bytes": 2237475,
+        "generation": "1788921807563736",
+        "key": "live-verification/two-input-20260909-a7/1/case-7.tar.gz",
+        "readback_verified": true,
+        "sha256": "d1b17788810a72fcd06cc6e049bba4d0d808891fb021bd34db47feec0663e975",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/1/case-7.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 553,
+      "replayBars": 16,
+      "firstInputMinute": 1620684900000,
+      "lastInputMinute": 1620699240000,
+      "positiveVolumeMinutes": 239,
+      "unsuppliedMinuteSlots": 1,
+      "originalChartStartMs": 1619992800000,
+      "effectiveChartStartMs": 1619992800000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "f9c799ab55940f65b058fd0c6a7f625de6342bc075de66024335112c6e06118e",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 4,
+          "tickEvents": 0,
+          "receivedSha256": "68ce7ee704f2ba121d9ec0712d1bfbd0d994c91c323c4e5ad86ee33204f3b97d",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 4,
+          "tickEvents": 956,
+          "receivedSha256": "f9a519716d0fd9d53d952dc9bf00a4ba93fac06536b08dd5047fce533c253e13",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 4,
+          "tickEvents": 956,
+          "receivedSha256": "c479673c422724102ecc86ef6e17722747095519e7df862c54bee3bc73902339",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-OANDA-XAUUSD-1D/standard/remarkablefreddy-scale-strat-trade-plan-wedge-trendlines",
+      "symbol": "OANDA:XAUUSD",
+      "scriptTf": "1D",
+      "status": "passed",
+      "sourceSha256": "5365180594f6173cc06dc7aefff9f48dc98471e7d17de6622959411f1a0063c6",
+      "caseArtifact": {
+        "bytes": 404921,
+        "generation": "1788921865746979",
+        "key": "live-verification/two-input-20260909-a7/2/case-7.tar.gz",
+        "readback_verified": true,
+        "sha256": "8ef28978f9232bb85f20046aa0d13be4a39fbd4c81cc2177ac5ba1ac5e1737a3",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/2/case-7.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 18,
+      "replayBars": 2,
+      "firstInputMinute": 1622066400000,
+      "lastInputMinute": 1622235540000,
+      "positiveVolumeMinutes": 2742,
+      "unsuppliedMinuteSlots": 18,
+      "originalChartStartMs": 1619989200000,
+      "effectiveChartStartMs": 1619989200000,
+      "auxiliaryRequired": true,
+      "calendarSha256": "45dfba32556575363174395db602490fdaf6ad03483795887afeccd54f7c58d9",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 3,
+          "tickEvents": 0,
+          "receivedSha256": "c6307dbbf10f54c576da6ad24404b8b0bcb97c93ac95225f95f6a404de32f91b",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 3,
+          "tickEvents": 10968,
+          "receivedSha256": "cd9c51519a8a9665bf2c223d56029985300cf7fcff5745b43994de1ad7868728",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 3,
+          "tickEvents": 10968,
+          "receivedSha256": "cc50c6af3b3be28b9f41a6a7331df0ff12caeb933ba7961a0f2040ff7275757b",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "scrapper:data-OANDA-XAUUSD-1D/standard/ahtisham-ee-decoded-volatility-expansion-ahtisham",
+      "symbol": "OANDA:XAUUSD",
+      "scriptTf": "1D",
+      "status": "passed",
+      "sourceSha256": "c847f31c0ad0a4457c8f4e13bdd3ccd7aa61690090682ae9d3efa2e3ef0caf75",
+      "caseArtifact": {
+        "bytes": 51767,
+        "generation": "1788921714686686",
+        "key": "live-verification/two-input-20260909-a7/3/case-7.tar.gz",
+        "readback_verified": true,
+        "sha256": "0640dcaeb5b8f063dbd2a54ec2e9d4bcb22c9bf0a9f7e0cd9a324feef0e7e025",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/3/case-7.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 29,
+      "replayBars": 2,
+      "firstInputMinute": 1623362400000,
+      "lastInputMinute": 1623704340000,
+      "positiveVolumeMinutes": 2726,
+      "unsuppliedMinuteSlots": 34,
+      "originalChartStartMs": 1619989200000,
+      "effectiveChartStartMs": 1619989200000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "45dfba32556575363174395db602490fdaf6ad03483795887afeccd54f7c58d9",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 1,
+          "tickEvents": 0,
+          "receivedSha256": "a5cbb3bc1c5a56a04c5dfea9f8b99e9f8962bad851e3ddbe7b8641499205bdd0",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 1,
+          "tickEvents": 10904,
+          "receivedSha256": "cecfbe68dd240fa9f2deac6551749a86493b7d29da66710fa8450a2f33d47721",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 1,
+          "tickEvents": 10904,
+          "receivedSha256": "80809b4be802773118dcf67d107eeae7d8c6f33dfddc6bef79fbce492bf9ee28",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "corpus:corpus/validation/order-deferred-flip-pooc-cross-bar-01",
+      "symbol": "BINANCE:ETHUSDT.P",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "0bf0a82079b8c41baf6a4dcb3e5294c95986c4f89d92d4c2e83f92a1954b108e",
+      "caseArtifact": {
+        "bytes": 4144994,
+        "generation": "1788922108697085",
+        "key": "live-verification/two-input-20260909-a7/0/case-8.tar.gz",
+        "readback_verified": true,
+        "sha256": "de631f925b52a340a973ad6dbf334ecfd4271bdfa1bc4f9bb3000d74e9da92eb",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/0/case-8.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 41,
+      "replayBars": 16,
+      "firstInputMinute": 1577873700000,
+      "lastInputMinute": 1577888040000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1577836800000,
+      "effectiveChartStartMs": 1577836800000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "badb51c67b7c1f822cd87e7ec2e5add6b19bb5ceda95de1b30fd609f76624b58",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 1,
+          "tickEvents": 0,
+          "receivedSha256": "fcb4bfed5ca2d84f72b5161d002f6c314d32c6b47634d8ac812d1d545b6e03c9",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 1,
+          "tickEvents": 960,
+          "receivedSha256": "13e0edacdc802094f672189a6c018c5fc29afd9da1dc26366334cb5b1d620f29",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 1,
+          "tickEvents": 960,
+          "receivedSha256": "2e3224bb271891cad40a6f1e7d1a98266887c36495804194708e6c84335861ef",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "corpus:corpus/validation/ta-pivot-atr-stop-target-01",
+      "symbol": "BINANCE:ETHUSDT.P",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "7c0b028981524698b55f986af1d650eaf71ddfb5566a335cfefaf134aa33dc26",
+      "caseArtifact": {
+        "bytes": 4456520,
+        "generation": "1788921936572204",
+        "key": "live-verification/two-input-20260909-a7/1/case-8.tar.gz",
+        "readback_verified": true,
+        "sha256": "7aa2ef288987fbba2a04f994ca7b42484ad8e11305656e6065ea6ca1709149a7",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/1/case-8.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 15,
+      "replayBars": 16,
+      "firstInputMinute": 1577850300000,
+      "lastInputMinute": 1577864640000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1577836800000,
+      "effectiveChartStartMs": 1577836800000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "badb51c67b7c1f822cd87e7ec2e5add6b19bb5ceda95de1b30fd609f76624b58",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 2,
+          "tickEvents": 0,
+          "receivedSha256": "6a4905952c553ac50587667899b7b6d9c89efb8463653bc0f95d95d60b2041bc",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "e41035fc70208deda27623be5a1e5490cfee870b29672817d56a0acd15f818f1",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 2,
+          "tickEvents": 960,
+          "receivedSha256": "fe3a15b15d5e5d820e437cf81f61cc549a0580a89828ba4269bddc8b3b011f4d",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    },
+    {
+      "probeId": "corpus:corpus/validation/ta-sma-152-close-cross-01",
+      "symbol": "BINANCE:ETHUSDT.P",
+      "scriptTf": "15",
+      "status": "passed",
+      "sourceSha256": "d8c7746013050548bc82f36d3e3e33cf20cae3e7404ea31b8997bebf7d8143ef",
+      "caseArtifact": {
+        "bytes": 4374827,
+        "generation": "1788921992510216",
+        "key": "live-verification/two-input-20260909-a7/2/case-8.tar.gz",
+        "readback_verified": true,
+        "sha256": "5a1ede629628eefb8973a404519483849cf57aca26cfceec144c590e4866c7bb",
+        "uri": "gs://pineforge-workflow-evidence/live-verification/two-input-20260909-a7/2/case-8.tar.gz"
+      },
+      "nativeChartEqual": true,
+      "historyBars": 197,
+      "replayBars": 16,
+      "firstInputMinute": 1578014100000,
+      "lastInputMinute": 1578028440000,
+      "positiveVolumeMinutes": 240,
+      "unsuppliedMinuteSlots": 0,
+      "originalChartStartMs": 1577836800000,
+      "effectiveChartStartMs": 1577836800000,
+      "auxiliaryRequired": false,
+      "calendarSha256": "badb51c67b7c1f822cd87e7ec2e5add6b19bb5ceda95de1b30fd609f76624b58",
+      "unknownClosingWindowsExcluded": 0,
+      "modes": {
+        "bars-direct": {
+          "actions": 3,
+          "tickEvents": 0,
+          "receivedSha256": "8878dd1a57d87d97d9144307fff11e2067397246df1a5a3192a347186cc65c09",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-high-first": {
+          "actions": 3,
+          "tickEvents": 960,
+          "receivedSha256": "bb06169f15751affb8598eb7dfd33697e045a7e945d084c44350194c0405c5ee",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        },
+        "ticks-low-first": {
+          "actions": 3,
+          "tickEvents": 960,
+          "receivedSha256": "0ad688a4499fd7fb3bc049a67e96f0d121332b1fefe9a43082880aa0454ad949",
+          "restartDeliveries": 0,
+          "duplicateIds": 0
+        }
+      }
+    }
+  ]
+}

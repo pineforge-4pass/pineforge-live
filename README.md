@@ -63,8 +63,8 @@ export PINEFORGE_ENGINE_ROOT="$(cd ../pineforge-engine && pwd)"
 scripts/build_engine.sh
 ```
 
-Use an ABI-v4 engine build. The last verified engine revision is
-`41c9c741d2b4f20eb793655bef4e9c56357a97fe`. CMake, a C++17 compiler and Git LFS
+Use an ABI-v4 engine build. Two-input probe verification used engine revision
+`399eeadaa34cdbae0e30829f0a6c1dbe900cdfa0`. CMake, a C++17 compiler and Git LFS
 are required; the corpus feed is an LFS object. The build script requires
 `PINEFORGE_ENGINE_ROOT` explicitly and compiles the public corpus, which can
 take several minutes. Keep the corpus revision pinned by the engine.
@@ -321,6 +321,14 @@ Webhook delivery errors preserve the queued messages. Startup never treats an
 HTTP acknowledgment as a fill or invents an account position.
 
 ## Verify
+
+The [two-input verification report](docs/two-input-verification.md) records
+**35/35 selected campaign probes passing** direct 1m OHLCV and both synthetic
+tick paths through the same runner: 201 actual HTTP order-action deliveries,
+zero duplicate IDs and zero restart deliveries. Each tick path processed
+122,092 trade ticks. All probes matched C++ batch on identical reconstructed
+input; 27 also matched native chart OHLCV, while 8 had source-data differences.
+The report pins the tested code, inputs, reviews and artifact hashes.
 
 ```sh
 python3 -m pytest

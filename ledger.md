@@ -18,7 +18,7 @@ receiver, and Apache-2.0 package metadata. The README and docs/webhooks.md
 are the supported public workflow. Broker-specific work below is historical,
 not unfinished work for this contract.
 
-The public webhook workflow is complete. Final validation: **834 tests
+The public webhook workflow is complete. Initial webhook validation: **834 tests
 passed with the ABI-v4 engine; 683 passed and 151 skipped without it**. Generic HTTP and WebSocket transport, compiled
 strategy to signed HTTP delivery, queue/receiver crash recovery, and no
 duplicate actions after restart are tested. Independent review found and
@@ -34,6 +34,36 @@ candidate Grok review is **GREEN (P0=0, P1=0, P2=0)** on code commit
 
 No push or public repository creation is performed; the earlier no-push
 instruction remains in force.
+
+## Two feed modes completed — 2026-09-09
+
+One production `run`/`check` runtime accepts ticks or user 1m OHLCV for
+higher script timeframes. `mock-feed` produces inputs for that same runtime;
+strategy decisions remain in C++. Minute aggregation, explicit calendars,
+observed sparse inputs and immutable auxiliary security history are included.
+
+The final Cloud Run measurement on
+`8356c15aebf19dcb88427baf709b237e31b5744e` passed **35/35 frozen probes across
+105 feed variants**, with 201 actual HTTP order-action deliveries and zero
+duplicate IDs or restart deliveries. Each tick path consumed 122,092 generated
+trade ticks. All 35 matched C++ batch on identical reconstructed bars; 27
+matched native chart OHLCV and 8 had source differences. All task/case/event
+and calendar receipts were read back and verified.
+
+This continuation fixed SQLite stored-value checksum coercion, minute
+security-feed visibility, session-label handling, missing-tail close
+verification, same-timeframe security routing and false tick coverage from
+quote-only inputs. No original rows, probe identities, strategy parameters
+or campaign grader/baseline were changed. Earlier unsuccessful measurements
+remain retained; attempt 6's two quote-only tick claims are superseded.
+
+The exact code commit received independent Grok GREEN (P0/P1/P2 = 0).
+Local tests: **950 passed, 151 engine fixtures skipped**; real probe execution
+was Cloud Run-only. Installed-wheel CLI checks passed outside the repository.
+See the [verification report](docs/two-input-verification.md) and
+[per-probe receipts](docs/verification/two-input-2026-09-09.json) for scope and
+source identities. This is bounded live/batch proof, not a campaign grade or
+broker-fill guarantee. No push or broker order was performed.
 
 ## Public webhook review corrections
 
@@ -66,8 +96,9 @@ and both Grok reviews are saved in
 Recovered baseline: B2 completed at `1255ef4`; OSS README committed as
 `1a3a6fb`. The earlier session's final TODO list is in the sibling
 `pineforge-workflow-live` B2 ledger. The latest user instruction there was
-**do not push**. This continuation remains local; no repository, release,
-exchange order or deployment has been created.
+**do not push**. At that recovered checkpoint, work remained local; no
+repository, release, exchange order or deployment had been created. The later
+isolated Cloud Run verification jobs are recorded above.
 
 ## Completed locally on 2026-09-09
 
