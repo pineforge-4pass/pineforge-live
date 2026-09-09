@@ -20,6 +20,12 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
 ]
 
+[project.urls]
+Homepage = "https://github.com/pineforge-4pass/pineforge-live"
+Documentation = "https://github.com/pineforge-4pass/pineforge-live/blob/main/README.md"
+Issues = "https://github.com/pineforge-4pass/pineforge-live/issues"
+Source = "https://github.com/pineforge-4pass/pineforge-live"
+
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 websocket = ["websockets>=14,<17"]

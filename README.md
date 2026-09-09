@@ -50,10 +50,11 @@ reconcile with the account before submitting new orders.
 ## Install
 
 Requires Python 3.12+, macOS or Linux, and a compiled strategy exposing
-PineForge C ABI v4. Run the following from the root of this source checkout
-after cloning or downloading it:
+PineForge C ABI v4. Clone this repository and install the Python runtime:
 
 ```sh
+git clone https://github.com/pineforge-4pass/pineforge-live.git
+cd pineforge-live
 python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e .
@@ -319,6 +320,13 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, PR scope and
 contribution licensing. The [changelog](CHANGELOG.md) tracks release changes.
 Maintainer campaign tooling is separate; cloud access is not required to use
 the runtime or submit a contribution.
+
+## Security reports
+
+Use GitHub's [private vulnerability reporting](https://github.com/pineforge-4pass/pineforge-live/security/advisories/new)
+for security-sensitive findings. Include the affected version, impact and a
+minimal reproduction with sensitive values removed. Keep exploit details,
+credentials and account information out of public issues.
 
 ## License
 

@@ -39,10 +39,11 @@ Before changing repository visibility or pushing a public release:
 
 - Confirm the repository owner/name and publication authorization. Link the
   README, license and contribution guide from the repository landing page.
-- Enable Issues and private vulnerability reporting, and verify a maintainer
-  receives private reports. Add the confirmed reporting channel to a security
-  policy before announcing the project; do not invent a contact address or
-  response-time commitment.
+- Enable Issues and private vulnerability reporting, and confirm maintainer
+  access to the repository's security advisories. Document the confirmed
+  reporting link in the README and contribution guide; do not invent a
+  contact address or response-time commitment. Broader security review
+  policies need explicit maintainer decisions about scope and exclusions.
 - Require review and the relevant CI checks for the default branch. Workflow
   tokens need only read access for tests; untrusted PR jobs must receive no
   cloud, broker or publishing secrets.

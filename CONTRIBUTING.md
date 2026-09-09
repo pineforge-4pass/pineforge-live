@@ -42,8 +42,9 @@ Include the runtime and engine versions, operating system, feed mode and a
 small reproduction. Describe what happened and what you expected. Share
 only configuration, strategies and data you have permission to redistribute;
 remove keys, webhook secrets, account details and private URLs from logs.
-For security-sensitive issues, arrange a private reporting channel with the
-maintainer before sharing exploit details; do not put them in a public issue.
+For security-sensitive issues, use GitHub's
+[private vulnerability reporting](https://github.com/pineforge-4pass/pineforge-live/security/advisories/new)
+instead of a public issue.
 
 Discuss substantial API changes before implementing them. Keep pull requests
 focused, explain the resulting behavior and include relevant test results.
