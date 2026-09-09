@@ -110,41 +110,95 @@ def first_session_minute(open_ms,session='24x7',timezone='UTC'):
     return int(first.timestamp())*1000
 
 
-def replay_calendar(chart,minute_ts,script_tf,*,session='24x7',timezone='UTC'):
-    """Replay-only schedule from timestamps, never prices or future actions.
+class ReplayCalendar(list):
+    """Runtime windows plus evidence of which closes permit live replay.
 
-    Intraday windows cannot extend past one script interval. Session daily
-    windows finish at the last supplied minute before the next native open.
-    Missing constituent minutes remain a refusal in the runtime aggregator.
+    Unknown daily closes have an independent bounding interval solely so
+    native warmup labels remain in the runtime's history prefix. Those
+    windows are never eligible for minute replay.
     """
-    width=tf_ms(script_tf);result=[]
+    def __init__(self, records, provenance):
+        super().__init__(records)
+        self.provenance = provenance
+        self.unknown_close_indices = frozenset(
+            row['index'] for row in provenance if not row['close_known'])
+
+
+def _daily_session_window(open_ms, session, timezone):
+    """An independently declared daily session, or no known close.
+
+    A label at session start anchors that session. A label at session end
+    can precede the next session (XAU's 17:00 label before its 18:00 open).
+    Other labels may be special sessions; regular hours do not establish
+    their closes. Calendar arithmetic preserves the IANA zone's DST rules.
+    """
+    if session == '24x7':
+        return open_ms, open_ms + 86_400_000
+    local = datetime.fromtimestamp(open_ms / 1000, ZoneInfo(timezone))
+    match = re.fullmatch(r'(\d{2})(\d{2})-(\d{2})(\d{2})(?::[1-7]+)?', session)
+    if not match:
+        raise ValueError('replay calendar requires single-session hours')
+    hour, minute, end_hour, end_minute = map(int, match.groups())
+    if hour > 23 or end_hour > 23 or minute > 59 or end_minute > 59:
+        raise ValueError('invalid session clock')
+    anchor = local.hour * 60 + local.minute
+    if anchor not in (hour * 60 + minute, end_hour * 60 + end_minute):
+        return None
+    first_ms = first_session_minute(open_ms, session, timezone)
+    first = datetime.fromtimestamp(first_ms / 1000, ZoneInfo(timezone))
+    close = first.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
+    if close <= first:
+        close += timedelta(days=1)
+    return first_ms, int(close.timestamp()) * 1000
+
+
+def replay_calendar(chart,minute_ts,script_tf,*,session='24x7',timezone='UTC'):
+    """Use native labels and declared hours, never surviving minute rows.
+
+    ``minute_ts`` remains an accepted argument for callers but cannot move
+    any endpoint. Unknown special-session closes are retained for native
+    warmup and explicitly excluded from live replay.
+    """
+    width=tf_ms(script_tf);records=[];provenance=[]
     for index,bar in enumerate(chart):
-        next_open=chart[index+1].ts_open if index+1<len(chart) else bar.ts_open+width
-        bound=min(next_open,bar.ts_open+width) if width<86_400_000 else next_open
-        low=bisect_left(minute_ts,bar.ts_open);high=bisect_left(minute_ts,bound)
-        close=minute_ts[high-1]+60_000 if high>low else min(bound,bar.ts_open+width)
-        if close<=bar.ts_open:raise ValueError('invalid timestamp-derived parent window')
-        first=first_session_minute(bar.ts_open,session,timezone) if width>=86_400_000 else bar.ts_open
-        if first>=close or (high>low and minute_ts[low]<first):
-            # Native labels can describe special sessions (e.g. Muhurat)
-            # outside the lane's regular hours. Keep the native opening;
-            # never move it forward to the first surviving input row.
-            first=bar.ts_open
-        result.append((bar.ts_open,close) if first==bar.ts_open else (bar.ts_open,close,first))
-    return result
+        next_open=chart[index+1].ts_open if index+1<len(chart) else None
+        bound=min(next_open,bar.ts_open+width) if next_open is not None else bar.ts_open+width
+        first=bar.ts_open;close=bound;known=True;reason=None
+        if width<86_400_000:
+            source='native-next-open/script-timeframe'
+        elif width==86_400_000:
+            window=_daily_session_window(bar.ts_open,session,timezone)
+            if window is None:
+                known=False;source='unknown-special-session';reason='native label does not anchor declared regular session'
+            else:
+                first,close=window
+                source='script-timeframe/24x7' if session=='24x7' else 'declared-session/IANA-timezone'
+                if next_open is not None and close>next_open:
+                    known=False;reason='declared close overlaps next native opening'
+                    first=bar.ts_open;close=bound;source='unknown-special-session'
+        else:
+            known=False;source='unknown-calendar-timeframe';reason='no independent multi-day closing schedule'
+        if close<=bar.ts_open:raise ValueError('invalid independently bounded parent window')
+        records.append((bar.ts_open,close) if first==bar.ts_open else (bar.ts_open,close,first))
+        provenance.append({'index':index,'open_ms':bar.ts_open,'first_minute_ms':first,
+                           'close_ms':close if known else None,'close_known':known,
+                           'close_source':source,'replay_eligible':known,
+                           **({'excluded_reason':reason,'warmup_bound_ms':close} if not known else {})})
+    return ReplayCalendar(records,provenance)
 
 
 def choose_window(chart,minute_ts,calendar,trades,count,*,gap_policy='reject'):
     eligible=[]
     schedule=ParentWindows(calendar)
     for i,(_,end) in enumerate(schedule.windows):
+        if i in getattr(calendar,'unknown_close_indices',()):continue
         first=schedule.first_minutes[i]
         left=bisect_left(minute_ts,first);right=bisect_left(minute_ts,end)
         if (left<right and minute_ts[right-1]+60_000==end
                 and (gap_policy=='observed' or (minute_ts[left]==first and right-left==(end-first)//60_000))):eligible.append(i)
     available=set(eligible)
-    # Preserve the original history origin and test its earliest covered
-    # trade window. A separate full native run remains the prefix oracle;
+    # Preserve the effective shared history origin and test its earliest
+    # covered trade window. Its complete native run remains the prefix oracle;
     # repeating years of closed-trade fingerprinting per input is unnecessary.
     trade_ends=sorted({t.exit_bar_index for t in trades if not t.open_at_end and t.exit_bar_index in available})
     ends=trade_ends+eligible
@@ -317,8 +371,10 @@ def verify(case):
     calendar_path.write_bytes(canonical_json_bytes([
         {'open_ms':row[0],'close_ms':row[1],**({'first_minute_ms':row[2]} if len(row)==3 else {})}
         for row in calendar]))
-    # Configuration/control stage computes the full native chart once and
-    # chooses the earliest covered replay window around a closed trade.
+    calendar_provenance_path=output/'calendar-provenance.json'
+    calendar_provenance_path.write_bytes(canonical_json_bytes(calendar.provenance))
+    # Compute the native chart from the effective shared origin once, then
+    # choose the earliest covered replay window around a closed trade.
     history_path=output/'history.csv';write_bars(history_path,chart[:1])
     source_path=output/'empty.jsonl';source_path.write_text('')
     base=config_base(case,library,metadata,calendar_path,history_path,source_path,output/'control.sqlite3','http://127.0.0.1:1/webhook')
@@ -436,7 +492,7 @@ def verify(case):
         grader=module(scripts/'verify_corpus.py','verification_canonical_grader')
         directory=output/'canonical-grade';shutil.copytree(evidence,directory)
         driver.write_engine_trades_csv([asdict(t) for t in native.trades],directory/'engine_trades.csv')
-        grading={'scope':'full native chart, unchanged canonical rubric, fixed live configuration; campaign warmup/origin optimization ladder and TV report-window/range-end projection not rerun',
+        grading={'scope':'native chart from effective shared origin, unchanged canonical rubric, fixed live configuration; campaign warmup/origin optimization ladder and TV report-window/range-end projection not rerun',
                  'result':clean(grader.analyze_strategy(directory)),'grader_sha256':file_identity(scripts/'verify_corpus.py')['sha256']}
     except Exception as exc:grading={'error':f'{type(exc).__name__}: {exc}','scope':'diagnostic only; not a campaign parity verdict'}
     ok=all(r['ok'] for r in modes.values()) and not native_prefix_mismatches
@@ -449,7 +505,12 @@ def verify(case):
                       'selection':'earliest eligible trade window; shared recorded-data origin retained',
                       'input_gap_policy':gap_policy,'unsupplied_minute_slots':sum((b-a)//60000 for a,b in active)-len(minutes),
                       'first_minute':minutes[0].ts_open,'last_minute':minutes[-1].ts_open,'minutes':len(minutes)},
-            'calendar':{'rule':'native labels and minute close timestamps; first input from declared session hours, no prices used','sha256':file_identity(calendar_path)['sha256']},
+            'calendar':{'rule':'native labels, script timeframe and declared session/IANA clock; endpoints independent of supplied minute rows',
+                        'sha256':file_identity(calendar_path)['sha256'],
+                        'provenance':file_identity(calendar_provenance_path),
+                        'unknown_close_windows':len(calendar.unknown_close_indices),
+                        'excluded_windows':[row for row in calendar.provenance if not row['close_known']],
+                        'replayed_close_sources':sorted({calendar.provenance[i]['close_source'] for i in range(start,end)})},
             'modes':modes,'batch_closed_trades':sum(not t.open_at_end for t in reference.trades),
             'batch_actions_in_window':len(expected),'trading_coverage':'nonempty' if expected else 'no-actions-in-window',
             'library':file_identity(library),'canonical_diagnostic':grading,

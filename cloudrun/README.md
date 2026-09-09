@@ -147,7 +147,10 @@ tick paths. It compares each settlement's broker-state hash, closed-trade
 digest, projected order actions, real HTTP delivery, and restart deduplication
 against a full C++ batch over identical script bars. Script bars are derived
 from the original 1m CSV. Native-chart differences are reported separately.
-The replay calendar uses only chart/minute timestamps, never prices or actions.
+The replay calendar uses native opening timestamps, declared session hours and
+IANA timezones, never prices or actions. Closing boundaries do not move when
+input minutes are missing. Windows whose closing schedule is unknown remain
+available for native warmup but are excluded from live replay.
 
 This is live/batch equivalence verification, not a new campaign grade or gate.
 The optional canonical-grader diagnostic uses fixed live flags; it does not
@@ -163,8 +166,9 @@ unavailable historical exchange tick sequence.
 
 The replay window is the earliest eligible trade window under the declared
 input coverage policy. It retains every warmup bar from the effective history origin. The
-worker also executes the full native chart once; when reconstructed bars match
-native bars, their broker-state prefix must match that complete run. This
+worker also executes the native chart from the effective shared origin once;
+when reconstructed bars match native bars, their broker-state prefix must
+match that run. This
 keeps long-history reference evidence while bounding repeated live replay.
 A partial run is restarted after two input events before the full replay, and
 a final restart must deliver no duplicate actions.
@@ -173,7 +177,9 @@ Sparse archived feeds must explicitly select `--input-gap-policy observed`
 when preparing a run. Results record the policy and unsupplied minute-slot
 count; no row is padded or invented. Strict mode remains the default for
 production feeds promising complete minute coverage. Native special-session
-labels take precedence when regular session hours cannot describe a window;
-missing first rows are never silently used to move that label forward.
+labels are retained, but a window without an independent closing schedule
+cannot establish closing coverage and is excluded from live replay.
 Both stream modes use the same common chart/minute history origin, including
-strategies with a one-time entry before a later-starting minute archive.
+strategies with a one-time entry before a later-starting minute archive. A
+restart at that shared origin verifies a new initial state; it does not
+reproduce a position opened before the available minute history.
