@@ -11,13 +11,14 @@ from pineforge_live.sources.base import SourceError,parse_bar
 from .synthetic import SyntheticMinuteTicks
 
 
-def iter_minutes(path: str | Path, *, start_ms=None, end_ms=None, parent_windows=None):
+def iter_minutes(path: str | Path, *, start_ms=None, end_ms=None, parent_windows=None,gap_policy='reject'):
     """Read original OHLCV rows; selected input must have complete 1m coverage.
 
     Bounds are inclusive start, exclusive end. A calendar permits gaps between
     windows; minutes inside each selected window remain contiguous. No OHLCV
     values are generated, normalized across sessions, or filled from parents.
     """
+    if gap_policy not in ('reject','observed'):raise ValueError('mock gap policy must be reject or observed')
     for name,value in (('start_ms',start_ms),('end_ms',end_ms)):
         if value is not None:
             _integer(value,name)
@@ -44,14 +45,15 @@ def iter_minutes(path: str | Path, *, start_ms=None, end_ms=None, parent_windows
             if calendar is not None:calendar.containing(stamp)
             if previous is not None:
                 expected=calendar.next_minute(previous.ts_open) if calendar else previous.ts_open+MINUTE_MS
-                if stamp!=expected:raise SourceError(f'mock feed: missing, repeated or regressed minute at row {number}')
+                if stamp!=expected and not (gap_policy=='observed' and stamp>expected):
+                    raise SourceError(f'mock feed: missing, repeated or regressed minute at row {number}')
             previous=bar
             yield bar
     if previous is None:raise SourceError('mock feed: selected range contains no minute rows')
 
 
 def mock_events(path: str | Path, *, mode='ticks',policy='high-first',seed=0,start_seq=1,
-                start_ms=None,end_ms=None,parent_windows=None):
+                start_ms=None,end_ms=None,parent_windows=None,gap_policy='reject'):
     """Yield JSON-compatible public events for ``pineforge-live run``.
 
     Ticks mode emits O/H/L/C trades, then the original minute's confirmed
@@ -60,8 +62,8 @@ def mock_events(path: str | Path, *, mode='ticks',policy='high-first',seed=0,sta
     if mode not in ('ticks','bars'):raise ValueError('mock feed mode must be ticks or bars')
     calendar=(parent_windows if isinstance(parent_windows,ParentWindows)
               else ParentWindows(parent_windows) if parent_windows is not None else None)
-    generator=SyntheticMinuteTicks(policy,seed=seed,start_seq=start_seq,parent_windows=calendar) if mode=='ticks' else None
-    for bar in iter_minutes(path,start_ms=start_ms,end_ms=end_ms,parent_windows=calendar):
+    generator=SyntheticMinuteTicks(policy,seed=seed,start_seq=start_seq,parent_windows=calendar,gap_policy=gap_policy) if mode=='ticks' else None
+    for bar in iter_minutes(path,start_ms=start_ms,end_ms=end_ms,parent_windows=calendar,gap_policy=gap_policy):
         if generator is not None:
             for tick in generator.push(bar).ticks:
                 yield {'type':'tick','ts':tick.ts,'seq':tick.seq,'price':tick.price,'qty':tick.qty}

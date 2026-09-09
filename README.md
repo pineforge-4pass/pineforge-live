@@ -168,7 +168,8 @@ boundary. This lets quiet periods close without inventing trades.
 Aggregation uses the campaign chart-feed rule: open is the first minute with
 positive volume, or the first minute's open when the parent has none. High,
 low and close include every supplied minute, including zero-volume quotes;
-volume is summed and rounded to six decimals. Missing minutes are refused.
+volume is summed and rounded to six decimals. Missing minutes are refused
+by default.
 Each consumed minute, forming state, decision and webhook is committed
 atomically. Identical replayed minutes are idempotent; changed rows stop the
 runtime. Tick sequences must remain contiguous across restart.
@@ -373,3 +374,8 @@ with observed minutes through the same runner, including after restart. C++
 continues to execute and fill orders on native script bars while its security
 queries read the auxiliary feed. See the [feed contract](docs/webhooks.md) for
 history boundaries and the separate `request.security_lower_tf()` limitation.
+
+Sparse 1m sources can explicitly choose `input_gap_policy: "observed"` and
+`mock-feed --gap-policy observed`. Only supplied rows are aggregated; no
+prices or volume are invented. Parent closing boundaries remain required.
+Keep the default `"reject"` for feeds promising every active minute.

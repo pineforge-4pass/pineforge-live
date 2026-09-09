@@ -156,3 +156,20 @@ def test_auxiliary_restart_refuses_tampered_committed_minute(tmp_path,monkeypatc
     resumed=asyncio.run(run_signals(c,mode='check',transport=transport))
     assert 'auxiliary input minute checksum mismatch' in resumed['error']
     assert len(FakeAuxHandle.calls)==before and not transport.received
+
+
+@pytest.mark.parametrize('mode',['bars','ticks'])
+def test_observed_auxiliary_stream_keeps_sparse_rows_without_padding(tmp_path,monkeypatch,fake_runtime,mode):
+    import pineforge_live.signals.runtime as runtime
+    from pineforge_live.adapters.mock_feed import mock_events
+    monkeypatch.setattr(runtime,'EngineHandle',FakeAuxHandle);FakeAuxHandle.calls=[]
+    path=tmp_path/'sparse.csv';write_bars(path,[minute(8)])
+    events=list(mock_events(path,mode=mode,gap_policy='observed'))
+    c=aux_config(tmp_path,events,input_mode=mode)
+    document=json.loads(c.path.read_text());document['input_gap_policy']='observed';c.path.write_text(json.dumps(document));c=load_signal_config(c.path)
+    transport=Transport();report=asyncio.run(run_signals(c,mode='check',transport=transport))
+    assert report['error'] is None and report['delivered']==1,report
+    assert FakeAuxHandle.calls[-1][1]==tuple(minute(i).ohlcv() for i in [0,1,2,3,4,5,8])
+    assert len(recorded(c)[1])==1
+    again=asyncio.run(run_signals(c,mode='check',transport=transport))
+    assert again['error'] is None and again['delivered']==0

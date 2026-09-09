@@ -20,7 +20,7 @@ def cmd_mock_feed(a):
     from pineforge_live.config import read_json
     windows=ParentWindows(read_json(a.parent_windows)) if a.parent_windows else None
     events=mock_events(a.feed,mode=a.input_mode,policy=a.policy,seed=a.seed,start_seq=a.start_seq,
-                       start_ms=a.start_ms,end_ms=a.end_ms,parent_windows=windows)
+                       start_ms=a.start_ms,end_ms=a.end_ms,parent_windows=windows,gap_policy=getattr(a,'gap_policy','reject'))
     def write(stream):
         for event in events:
             stream.write(json.dumps(event,sort_keys=True,separators=(',',':'),allow_nan=False)+'\n')
@@ -269,6 +269,8 @@ def main(argv=None) -> int:
     s.add_argument('--policy',choices=('high-first','low-first','seeded'),default='high-first')
     s.add_argument('--seed',type=int,default=0)
     s.add_argument('--start-seq',type=_positive_int,default=1)
+    s.add_argument('--gap-policy',choices=('reject','observed'),default='reject',
+                   help='observed keeps explicitly sparse input rows without synthesizing prices')
     s.add_argument('--start-ms',type=int,help='inclusive first minute; begin immediately after warmup history')
     s.add_argument('--end-ms',type=int,help='exclusive minute bound')
     s.add_argument('--parent-windows',type=Path,help='same price-independent calendar JSON used by the runtime')

@@ -83,6 +83,8 @@ def validate_manifest(manifest, index, count):
     _integer(manifest.get("dailyReplayBars", 2), "dailyReplayBars", 1, 1000)
     _integer(manifest.get("caseTimeoutSeconds", 900), "caseTimeoutSeconds", 1, 3600)
     _integer(manifest.get("seed", 20260909), "seed", -(2**63), 2**63-1)
+    if manifest.get('inputGapPolicy','reject') not in ('reject','observed'):
+        raise ValueError('inputGapPolicy must be reject or observed')
     if manifest.get("buildProfile", "engine-default-v1") != "engine-default-v1":
         raise ValueError("this worker supports engine-default-v1 only")
     return ids[index::count]
@@ -347,6 +349,7 @@ def run_task(manifest, store, index, count, workspace, *, manifest_sha256=None):
                         "daily_replay_bars": manifest.get("dailyReplayBars", 2),
                         "tick_policies": manifest.get("tickPolicies", ["high-first", "low-first"]),
                         "seed": manifest.get("seed", 20260909), "liveCommit": manifest["liveCommit"],
+                        "input_gap_policy": manifest.get('inputGapPolicy','reject'),
                     }
                     config = case_dir/"case.json"
                     config.write_bytes(canonical_json_bytes(case))

@@ -74,3 +74,16 @@ def test_public_runner_and_restart_accept_declared_late_first_minute(tmp_path,fa
     assert bars[-1]['ts_open']==360000 and len(minutes)==2
     second=asyncio.run(run_signals(c,mode='check',transport=transport))
     assert second['error'] is None and second['delivered']==0 and len(transport.received)==1
+
+
+def test_special_session_keeps_native_label_and_does_not_hide_missing_open():
+    zone=ZoneInfo('Asia/Kolkata')
+    labels=[int(datetime(2021,11,day,hour,minute_,tzinfo=zone).timestamp())*1000
+            for day,hour,minute_ in [(3,9,15),(4,18,0),(8,9,15),(9,9,15)]]
+    chart=[replace(minute(i),ts_open=t) for i,t in enumerate(labels)]
+    stamps=[t for i,start in enumerate(labels) for t in range(start+(7*60000 if i==1 else 0),start+60*60000,60000)]
+    calendar=replay_calendar(chart,stamps,'1D',session='0915-1530',timezone='Asia/Kolkata')
+    assert calendar[1][0]==labels[1] and len(calendar[1])==2
+    trade=type('ClosedTrade',(),{'exit_bar_index':1,'open_at_end':False})()
+    assert choose_window(chart,stamps,calendar,[trade],1,gap_policy='observed')==(1,2)
+    assert choose_window(chart,stamps,calendar,[trade],1)!=(1,2)

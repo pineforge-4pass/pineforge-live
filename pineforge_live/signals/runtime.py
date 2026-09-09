@@ -198,9 +198,12 @@ async def _run_signals(config, *, mode=None, source=None, transport=None, clock=
         minute_stream=None
         if minute_mode:
             minute_stream=(MinuteStream.from_state(context['input_state'],parent_windows=calendar) if context.get('input_state')
-                           else MinuteStream(config.script_tf,mode=getattr(config,'input_mode','mixed'),parent_windows=calendar))
+                           else MinuteStream(config.script_tf,mode=getattr(config,'input_mode','mixed'),parent_windows=calendar,
+                                             gap_policy=config.input_gap_policy))
             if minute_stream.mode != getattr(config,'input_mode','mixed'):
                 raise SourceError('minute input checkpoint mode mismatch')
+            if minute_stream.aggregator.gap_policy!=config.input_gap_policy:
+                raise SourceError('minute input checkpoint gap policy mismatch')
             if context['forming'] is not None and context.get('input_state') is None:
                 raise SourceError('minute runtime forming state has no aggregation checkpoint')
         last_seq=context['last_seq']

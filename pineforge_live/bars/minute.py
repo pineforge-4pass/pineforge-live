@@ -76,8 +76,8 @@ class MinuteBarAggregator:
         self._width = tf_ms(script_tf)
         if self._width <= MINUTE_MS or self._width % MINUTE_MS:
             raise ValueError("script_tf must be an integer multiple of 1m greater than 1m")
-        if gap_policy not in ("reject", "carry-forward"):
-            raise ValueError("gap_policy must be reject or carry-forward")
+        if gap_policy not in ("reject", "carry-forward", "observed"):
+            raise ValueError("gap_policy must be reject, carry-forward or observed")
         if volume_decimals is not None:
             _integer(volume_decimals, "volume_decimals", maximum=15)
         _integer(max_gap_minutes, "max_gap_minutes", maximum=1_000_000)
@@ -107,7 +107,7 @@ class MinuteBarAggregator:
             raise ValueError("minute: script bucket exceeds timestamp bound")
         if self._last is None:
             first=self.calendar.first_minute(start) if self.calendar is not None else start
-            if bar.ts_open != first:
+            if bar.ts_open != first and self.gap_policy!='observed':
                 raise ValueError("first minute must begin script bucket; restore state for a partial bucket")
             missing = []
         else:
@@ -119,6 +119,16 @@ class MinuteBarAggregator:
                 raise ValueError("minute timestamp regressed")
             expected=self._next_minute(self._last.ts_open)
             missing=[]
+            if expected<bar.ts_open and self.gap_policy=='observed':
+                previous_start,_=self.bounds(self._last.ts_open)
+                expected_start,_=self.bounds(expected)
+                if self._cur is not None and start!=previous_start:
+                    raise ValueError('observed input cannot skip a parent closing minute')
+                if self._cur is None and start!=expected_start:
+                    raise ValueError('observed input cannot skip an entire parent')
+                # Explicit sparse-input contract: fold only supplied rows.
+                # No volume, price, quote, or auxiliary minute is fabricated.
+                expected=bar.ts_open
             while expected<bar.ts_open:
                 if self.gap_policy == "reject":
                     raise ValueError("minute gap; supply every confirmed minute or configure carry-forward")

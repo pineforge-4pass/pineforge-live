@@ -125,20 +125,23 @@ def replay_calendar(chart,minute_ts,script_tf,*,session='24x7',timezone='UTC'):
         close=minute_ts[high-1]+60_000 if high>low else min(bound,bar.ts_open+width)
         if close<=bar.ts_open:raise ValueError('invalid timestamp-derived parent window')
         first=first_session_minute(bar.ts_open,session,timezone) if width>=86_400_000 else bar.ts_open
-        if first>=close:
-            raise ValueError('declared session starts after the available parent window closes')
+        if first>=close or (high>low and minute_ts[low]<first):
+            # Native labels can describe special sessions (e.g. Muhurat)
+            # outside the lane's regular hours. Keep the native opening;
+            # never move it forward to the first surviving input row.
+            first=bar.ts_open
         result.append((bar.ts_open,close) if first==bar.ts_open else (bar.ts_open,close,first))
     return result
 
 
-def choose_window(chart,minute_ts,calendar,trades,count):
+def choose_window(chart,minute_ts,calendar,trades,count,*,gap_policy='reject'):
     eligible=[]
     schedule=ParentWindows(calendar)
     for i,(_,end) in enumerate(schedule.windows):
         first=schedule.first_minutes[i]
         left=bisect_left(minute_ts,first);right=bisect_left(minute_ts,end)
-        if (left<right and minute_ts[left]==first and minute_ts[right-1]+60_000==end
-                and right-left==(end-first)//60_000):eligible.append(i)
+        if (left<right and minute_ts[right-1]+60_000==end
+                and (gap_policy=='observed' or (minute_ts[left]==first and right-left==(end-first)//60_000))):eligible.append(i)
     available=set(eligible)
     # Preserve the original history origin and test its earliest covered
     # trade window. A separate full native run remains the prefix oracle;
@@ -254,8 +257,8 @@ def configure_handle(handle,config,observed=()):
     apply_epoch(handle,config.epoch)
 
 
-def write_events(path,minutes,script_tf,calendar,mode,policy,seed):
-    generator=SyntheticMinuteTicks(policy,seed=seed,parent_windows=calendar) if mode=='ticks' else None
+def write_events(path,minutes,script_tf,calendar,mode,policy,seed,*,gap_policy='reject'):
+    generator=SyntheticMinuteTicks(policy,seed=seed,parent_windows=calendar,gap_policy=gap_policy) if mode=='ticks' else None
     with Path(path).open('w') as stream:
         for bar in minutes:
             if mode=='ticks':
@@ -301,12 +304,13 @@ def verify(case):
     timezone=env.get('PINEFORGE_VERIFY_TIMEZONE',runtime.get('timezone','UTC'))
     auxiliary=bool(re.search(r'\brequest\s*\.\s*security\s*\(',Path(case['evidence']['strategy']).read_text()))
     original_chart_start=chart[0].ts_open
-    if auxiliary:
-        # Native auxiliary routing requires coverage of each chart candle.
-        # Select the shared history origin from timestamps only, not grades.
-        daily=tf_ms(case['probe']['timeframe'])>=86_400_000
-        chart=[bar for bar in chart if (first_session_minute(bar.ts_open,session,timezone) if daily else bar.ts_open)>=minute_ts[0]]
-        if not chart:raise ValueError('no native chart history with auxiliary minute coverage')
+    # Both replay streams start at their common recorded-data origin. This
+    # also covers a one-time entry that predates a later-starting finer feed.
+    # Every preceding bar from that declared effective origin is retained.
+    daily=tf_ms(case['probe']['timeframe'])>=86_400_000
+    chart=[bar for bar in chart if (first_session_minute(bar.ts_open,session,timezone) if daily else bar.ts_open)>=minute_ts[0]]
+    if not chart:raise ValueError('no native chart history with minute coverage')
+    gap_policy=case.get('input_gap_policy','reject')
     calendar=replay_calendar(chart,minute_ts,case['probe']['timeframe'],
                              session=session,timezone=timezone)
     calendar_path=output/'calendar.json'
@@ -318,6 +322,7 @@ def verify(case):
     history_path=output/'history.csv';write_bars(history_path,chart[:1])
     source_path=output/'empty.jsonl';source_path.write_text('')
     base=config_base(case,library,metadata,calendar_path,history_path,source_path,output/'control.sqlite3','http://127.0.0.1:1/webhook')
+    base['input_gap_policy']=gap_policy
     if auxiliary:base['auxiliary_history_path']=case['feeds']['finer']
     config_path=output/'control-config.json';config_path.write_bytes(canonical_json_bytes(base))
     config=load_signal_config(config_path)
@@ -328,13 +333,13 @@ def verify(case):
         if len(native.broker_state_hash)!=len(chart):raise RuntimeError('native reference hash coverage mismatch')
     native_control_ms=round((time.perf_counter()-native_started)*1000,3)
     count=case['daily_replay_bars'] if tf_ms(config.script_tf)>=86_400_000 else case['replay_bars']
-    start,end=choose_window(chart,minute_ts,calendar,native.trades,count)
+    start,end=choose_window(chart,minute_ts,calendar,native.trades,count,gap_policy=gap_policy)
     minutes=read_bars(case['feeds']['finer'],calendar[start][0],calendar[end-1][1])
     # Limit input to declared active windows; no quotes from a closed session
     # are injected into a parent merely because they fall between sessions.
     active=[(row[2] if len(row)==3 else row[0],row[1]) for row in calendar[start:end]]
     minutes=[b for b in minutes if any(a<=b.ts_open<z for a,z in active)]
-    agg=MinuteBarAggregator(config.script_tf,parent_windows=calendar)
+    agg=MinuteBarAggregator(config.script_tf,parent_windows=calendar,gap_policy=gap_policy)
     derived=[]
     for b in minutes:derived.extend(agg.push(b))
     if len(derived)!=end-start:raise ValueError('trailing incomplete parent in selected minute window')
@@ -393,7 +398,7 @@ def verify(case):
     try:
         for mode,policy in [('bars','direct')]+[('ticks',p) for p in case['tick_policies']]:
             name=mode+'-'+policy;folder=output/name;folder.mkdir()
-            events=folder/'events.jsonl';write_events(events,minutes,config.script_tf,calendar,mode,policy,case['seed'])
+            events=folder/'events.jsonl';write_events(events,minutes,config.script_tf,calendar,mode,policy,case['seed'],gap_policy=gap_policy)
             doc=dict(base,journal_path=str(folder/'signals.sqlite3'),input_mode=mode,
                      source={'kind':'jsonl','path':str(events)},webhook={'target_url':f'http://127.0.0.1:{server.server_port}/webhook','backoff_initial_ms':1,'backoff_max_ms':1})
             path=folder/'config.json';path.write_bytes(canonical_json_bytes(doc));mode_config=load_signal_config(path)
@@ -441,7 +446,8 @@ def verify(case):
             'native_prefix_equal':None if native_prefix_mismatches is None else not native_prefix_mismatches,
             'native_prefix_mismatches':None if native_prefix_mismatches is None else native_prefix_mismatches[:10],
             'window':{'start_index':start,'end_index_exclusive':end,'history_bars':start,'replay_bars':end-start,
-                      'selection':'earliest complete trade window; original effective history origin retained',
+                      'selection':'earliest eligible trade window; shared recorded-data origin retained',
+                      'input_gap_policy':gap_policy,'unsupplied_minute_slots':sum((b-a)//60000 for a,b in active)-len(minutes),
                       'first_minute':minutes[0].ts_open,'last_minute':minutes[-1].ts_open,'minutes':len(minutes)},
             'calendar':{'rule':'native labels and minute close timestamps; first input from declared session hours, no prices used','sha256':file_identity(calendar_path)['sha256']},
             'modes':modes,'batch_closed_trades':sum(not t.open_at_end for t in reference.trades),

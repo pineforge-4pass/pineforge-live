@@ -15,11 +15,12 @@ from .minute import MINUTE_MS, MinuteBarAggregator, _integer, _number, validate_
 
 
 class MinuteStream:
-    def __init__(self, script_tf: str, *, mode: str = 'mixed', parent_windows=None):
+    def __init__(self, script_tf: str, *, mode: str = 'mixed', parent_windows=None,gap_policy='reject'):
         if mode not in ('mixed','ticks','bars'):
             raise ValueError('minute stream mode must be mixed, ticks or bars')
         self.mode = mode
-        self.aggregator = MinuteBarAggregator(script_tf,parent_windows=parent_windows)
+        if gap_policy not in ('reject','observed'):raise ValueError('minute stream gap policy must be reject or observed')
+        self.aggregator = MinuteBarAggregator(script_tf,parent_windows=parent_windows,gap_policy=gap_policy)
         self.pending: T.NormalizedBar | None = None
         self.last_input: T.NormalizedBar | None = None
 

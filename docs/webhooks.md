@@ -384,3 +384,16 @@ history, auxiliary data, timezones and strategy settings in its backtest.
 This auxiliary route does not supply native intrabars to
 `request.security_lower_tf()`; that function retains the pinned C++ engine's
 native-chart behavior.
+
+For a source whose contract explicitly permits absent 1m rows,
+`input_gap_policy: "observed"` aggregates only the supplied rows. It generates
+no prices, volume or auxiliary bars for omitted minutes. The default remains
+`"reject"`; observed mode still refuses changed/out-of-order rows, tick
+sequence gaps, a missing parent closing minute, and an entirely skipped
+parent. Use the same sparse input contract in the corresponding backtest.
+Changing this option changes the deployment identity.
+
+`mock-feed --gap-policy observed` preserves the original sparse CSV rows and
+produces matching input for this mode. Missing data is not represented as
+fictional trades or carried-forward candles. A calendar must still define
+each parent's closing boundary; an unfinished final parent remains forming.

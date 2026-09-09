@@ -112,7 +112,8 @@ def test_verifier_runs_both_modes_real_http_and_restart_with_fake_decisions(tmp_
     agg=MinuteBarAggregator('3');parents=[]
     for m in minutes:parents.extend(agg.push(m))
     chart=tmp_path/'chart.csv';finer=tmp_path/'finer.csv'
-    case.write_bars(chart,parents);case.write_bars(finer,minutes)
+    finer_start=6 if handle_type is FakeHandle and not auxiliary and not corrupt_actions else 0
+    case.write_bars(chart,parents);case.write_bars(finer,minutes[finer_start:])
     output=tmp_path/'output';output.mkdir()
     doc={'output':str(output),'evidence':{'strategy':str(source)},'lab':str(tmp_path),'engine':str(tmp_path),
          'probe':{'probe_id':'offline-fixture','symbol':'TEST:MOCK','timeframe':'3'},'template':{'environment':{}},
@@ -120,6 +121,7 @@ def test_verifier_runs_both_modes_real_http_and_restart_with_fake_decisions(tmp_
          'tick_policies':['high-first','low-first'],'seed':7}
     result=case.verify(doc)
     assert result['status']==status,result
+    assert result['configuration']['effective_chart_start_ms']==finer_start*60000
     if handle_type is RepaintingHandle:assert result['native_prefix_mismatches']==[0]
     assert result['native_chart_equal'] and result['batch_actions_in_window']==expected_actions
     assert all(x['closed_trade_exit_quantity_equal'] is (not corrupt_actions) for x in result['modes'].values())

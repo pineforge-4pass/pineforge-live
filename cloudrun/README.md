@@ -161,10 +161,19 @@ probes remain in the result; the selection is never replaced after observation.
 Synthetic ticks represent explicit high-first and low-first models, not the
 unavailable historical exchange tick sequence.
 
-The replay window is the earliest eligible trade window with complete minute
-coverage. It retains every warmup bar from the effective history origin. The
+The replay window is the earliest eligible trade window under the declared
+input coverage policy. It retains every warmup bar from the effective history origin. The
 worker also executes the full native chart once; when reconstructed bars match
 native bars, their broker-state prefix must match that complete run. This
 keeps long-history reference evidence while bounding repeated live replay.
 A partial run is restarted after two input events before the full replay, and
 a final restart must deliver no duplicate actions.
+
+Sparse archived feeds must explicitly select `--input-gap-policy observed`
+when preparing a run. Results record the policy and unsupplied minute-slot
+count; no row is padded or invented. Strict mode remains the default for
+production feeds promising complete minute coverage. Native special-session
+labels take precedence when regular session hours cannot describe a window;
+missing first rows are never silently used to move that label forward.
+Both stream modes use the same common chart/minute history origin, including
+strategies with a one-time entry before a later-starting minute archive.

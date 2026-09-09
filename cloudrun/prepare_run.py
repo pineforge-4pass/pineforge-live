@@ -11,7 +11,8 @@ from pineforge_live.verification.cloud_io import canonical_json_bytes,file_ident
 from pineforge_live.verification.selection import select_probes
 
 
-def prepare(export,output,live_commit,run_id,*,per_lane=2,extra_probe_ids=(),all_probes=False):
+def prepare(export,output,live_commit,run_id,*,per_lane=2,extra_probe_ids=(),all_probes=False,input_gap_policy='reject'):
+    if input_gap_policy not in ('reject','observed'):raise ValueError('invalid input gap policy')
     if not re.fullmatch('[0-9a-f]{40}',live_commit):raise ValueError('full live commit required')
     if not re.fullmatch('[a-z0-9][a-z0-9-]{1,62}',run_id):raise ValueError('bounded run id required')
     export=Path(export);output=Path(output);output.mkdir(parents=True,exist_ok=False)
@@ -47,7 +48,8 @@ def prepare(export,output,live_commit,run_id,*,per_lane=2,extra_probe_ids=(),all
     manifest={'schemaVersion':'pineforge-live-two-input-run/v1','runId':run_id,'liveCommit':live_commit,
               'sources':sources,'probePacket':{**file_identity(archive),'manifestSha256':file_identity(packet_path)['sha256']},
               'probeIds':[p['probe_id'] for p in selected],'replayBars':16,'dailyReplayBars':2,
-              'tickPolicies':['high-first','low-first'],'seed':20260909,'caseTimeoutSeconds':900}
+              'tickPolicies':['high-first','low-first'],'seed':20260909,'caseTimeoutSeconds':900,
+              'inputGapPolicy':input_gap_policy}
     run=output/'run.json';run.write_bytes(canonical_json_bytes(manifest))
     receipt={'runManifest':file_identity(run),'probePacket':file_identity(archive),
              'liveCommit':live_commit,'selectedProbes':len(selected),'registryMutated':False}
@@ -59,7 +61,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     for key in ('export','output','live-commit','run-id'):p.add_argument('--'+key,required=True)
     p.add_argument('--per-lane',type=int,default=2);p.add_argument('--extra-probe',action='append',default=[])
-    p.add_argument('--all-probes',action='store_true');args=vars(p.parse_args())
+    p.add_argument('--all-probes',action='store_true');p.add_argument('--input-gap-policy',choices=('reject','observed'),default='reject');args=vars(p.parse_args())
     args['extra_probe_ids']=args.pop('extra_probe')
     print(json.dumps(prepare(**args),indent=2))
 

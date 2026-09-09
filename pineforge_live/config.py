@@ -143,6 +143,7 @@ class SignalConfig:
     input_mode: str = 'mixed'
     parent_windows: tuple[tuple[int,int], ...] | None = None
     auxiliary_history_path: Path | None = None
+    input_gap_policy: str = 'reject'
 
     @property
     def library_path(self):
@@ -159,7 +160,7 @@ def load_signal_config(path: str | Path) -> SignalConfig:
     base = path.parent
     d = _object(read_json(path), 'config',
                 ('strategy_path', 'strategy_name', 'history_path', 'journal_path', 'script_tf', 'instrument', 'syminfo', 'webhook', 'source'),
-                ('schema_version', 'strategy_source_path', 'mode', 'inputs', 'overrides', 'horizon_bars', 'trigger_mode', 'max_eval_rate', 'input_tf', 'input_mode', 'parent_windows_path', 'chart_timezone', 'auxiliary_history_path'))
+                ('schema_version', 'strategy_source_path', 'mode', 'inputs', 'overrides', 'horizon_bars', 'trigger_mode', 'max_eval_rate', 'input_tf', 'input_mode', 'parent_windows_path', 'chart_timezone', 'auxiliary_history_path','input_gap_policy'))
     if type(d.get('schema_version', 1)) is not int or d.get('schema_version', 1) != 1:
         raise ConfigError('schema_version: unsupported version')
     strategy = _path(d['strategy_path'], 'strategy_path', base)
@@ -191,6 +192,11 @@ def load_signal_config(path: str | Path) -> SignalConfig:
         raise ConfigError('input_mode: expected mixed, ticks or bars')
     if input_mode != 'mixed' and not (input_tf == '1' and width > 60_000):
         raise ConfigError('input_mode: ticks/bars modes require input_tf=1 and script_tf>1')
+    input_gap_policy=d.get('input_gap_policy','reject')
+    if not isinstance(input_gap_policy,str) or input_gap_policy not in {'reject','observed'}:
+        raise ConfigError('input_gap_policy: expected reject or observed')
+    if input_gap_policy!='reject' and not (input_tf=='1' and width>60000):
+        raise ConfigError('input_gap_policy: observed requires input_tf=1 and script_tf>1')
     auxiliary_history_path=None
     if 'auxiliary_history_path' in d:
         if input_tf!='1' or width<=60_000:
@@ -289,6 +295,7 @@ def load_signal_config(path: str | Path) -> SignalConfig:
         source_identity['input_tf'] = input_tf
     if input_mode != 'mixed':
         source_identity['input_mode'] = input_mode
+    if input_gap_policy!='reject':source_identity['input_gap_policy']=input_gap_policy
     if source.path is not None:
         source_identity['path']=Path(os.path.normpath(d['source']['path'])).as_posix()
     receipt = {'library_sha256': library_sha, 'compiler_id': 'unrecorded', 'codegen_sha': 'unrecorded',
@@ -304,4 +311,4 @@ def load_signal_config(path: str | Path) -> SignalConfig:
                 'trigger_mode': trigger_mode, 'max_eval_rate': max_eval_rate, 'webhook': asdict(webhook), 'source': source_identity}
     return SignalConfig(path, strategy, d['strategy_name'], strategy_source, history_path, journal_path,
                         mode, d['script_tf'], instrument, syminfo, settings['inputs'], settings['overrides'],
-                        horizon, trigger_mode, webhook, source, epoch, T.canonical_sha256(_canonical(identity)), history, max_eval_rate, input_tf, input_mode,parent_windows,auxiliary_history_path)
+                        horizon, trigger_mode, webhook, source, epoch, T.canonical_sha256(_canonical(identity)), history, max_eval_rate, input_tf, input_mode,parent_windows,auxiliary_history_path,input_gap_policy)

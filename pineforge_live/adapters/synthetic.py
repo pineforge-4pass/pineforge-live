@@ -51,12 +51,14 @@ class SyntheticMinuteTicks:
     """
 
     def __init__(self, policy: str = "high-first", *, seed: int = 0, start_seq: int = 1,
-                 parent_windows=None):
+                 parent_windows=None,gap_policy='reject'):
         if policy not in SYNTHETIC_POLICIES:
             raise ValueError(f"unknown synthetic policy; expected one of {SYNTHETIC_POLICIES}")
         _integer(seed, "seed")
         _integer(start_seq, "start_seq")
+        if gap_policy not in ('reject','observed'):raise ValueError('synthetic gap policy must be reject or observed')
         self.policy, self.seed, self.next_seq = policy, seed, start_seq
+        self.gap_policy=gap_policy
         self.calendar=ParentWindows(parent_windows) if parent_windows is not None else None
         self._last: SyntheticMinute | None = None
 
@@ -88,7 +90,7 @@ class SyntheticMinuteTicks:
                 raise ValueError("changed duplicate synthetic minute")
             expected=(self.calendar.next_minute(self._last.bar.ts_open) if self.calendar is not None
                       else self._last.ts_close)
-            if bar.ts_open != expected:
+            if bar.ts_open != expected and not (self.gap_policy=='observed' and bar.ts_open>expected):
                 raise ValueError("synthetic minutes must be contiguous and increasing")
         packet = self._packet(bar, self.next_seq)
         self.next_seq += len(packet.ticks)
@@ -96,18 +98,20 @@ class SyntheticMinuteTicks:
         return packet
 
     def export_state(self) -> dict:
-        return {"version": 1, "policy": self.policy, "seed": self.seed,
+        state={"version": 1, "policy": self.policy, "seed": self.seed,
                 "next_seq": self.next_seq,
                 "parent_windows": self.calendar.records if self.calendar is not None else None,
                 "last_minute": asdict(self._last.bar) if self._last is not None else None}
+        if self.gap_policy!='reject':state['gap_policy']=self.gap_policy
+        return state
 
     @classmethod
     def from_state(cls, state: dict) -> "SyntheticMinuteTicks":
         if (not isinstance(state, dict)
-                or set(state) != {"version", "policy", "seed", "next_seq", "last_minute", "parent_windows"}
+                or set(state)-{'gap_policy'} != {"version", "policy", "seed", "next_seq", "last_minute", "parent_windows"}
                 or type(state["version"]) is not int or state["version"] != 1):
             raise ValueError("invalid synthetic-minute checkpoint")
-        result = cls(state["policy"], seed=state["seed"], start_seq=state["next_seq"],parent_windows=state['parent_windows'])
+        result = cls(state["policy"], seed=state["seed"], start_seq=state["next_seq"],parent_windows=state['parent_windows'],gap_policy=state.get('gap_policy','reject'))
         if state["last_minute"] is not None:
             try:
                 bar = T.NormalizedBar(**state["last_minute"])
