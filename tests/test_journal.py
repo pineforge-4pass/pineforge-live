@@ -576,24 +576,24 @@ def test_prepare_pad_races_a_concurrent_write_without_disarming_it(tmp_path, mon
     # file, so the worst case is a harmless over-length file.
     m = StopMarker(tmp_path / "j.sqlite3.stop")
     m.path.write_bytes(b"")  # short/armed, as in the R3 crash scenario
-    real_stat = Path.stat
+    real_open = os.open
     raced = []
-    def racing_stat(self, *a, **kw):
-        # prepare()'s only Path.stat() call on this file is its explicit
-        # size check (_payload()'s exists() check uses os.path.exists(),
-        # not Path.stat(), on this Python version) -- capture the OLD
-        # (short) size first, exactly as the real call would, THEN inject
-        # the race so the returned size is stale relative to the file the
-        # subsequent pad write actually sees.
-        result = real_stat(self, *a, **kw)
-        if self == m.path and not raced:
+    def racing_open(path, flags, *a, **kw):
+        # Inject after prepare() captured the short size but before it opens
+        # the padding descriptor. Path.exists() calls Path.stat() on some
+        # Python versions, so a Path.stat hook can instead set the marker
+        # before the initial payload check and miss the intended race.
+        if os.fspath(path) == os.fspath(m.path) and flags & os.O_APPEND and not raced:
             raced.append(True)
             StopMarker(m.path).write("HARD", "HOLD", "raced in")
-        return result
-    monkeypatch.setattr(Path, "stat", racing_stat)
+        return real_open(path, flags, *a, **kw)
+    monkeypatch.setattr(os, "open", racing_open)
 
     m.prepare()
 
+    from pineforge_live.journal.sidecar import SIZE
+    assert raced == [True]
+    assert m.path.stat().st_size == 2 * SIZE  # STOP payload, then stale-size pad.
     assert m.exists()  # the race's SET marker survived the pad -- not disarmed
     assert m.read()["cause"] == "raced in"
 
