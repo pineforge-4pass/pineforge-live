@@ -248,7 +248,9 @@ def _merge_report(entry, report, status, policies):
                 or type(report.get("batch_actions_in_window")) is not int
                 or report["batch_actions_in_window"] <= 0
                 or not isinstance(modes, dict) or set(modes) != expected_modes
-                or any(not isinstance(mode, dict) or mode.get("ok") is not True for mode in modes.values())):
+                or any(not isinstance(mode, dict) or mode.get("ok") is not True for mode in modes.values())
+                or any(type(mode.get('tick_events')) is not int or mode['tick_events']<=0
+                       for name,mode in modes.items() if name.startswith('ticks-'))):
             raise RuntimeError("case pass lacks successful evidence for every requested mode")
     entry.update(report)
 

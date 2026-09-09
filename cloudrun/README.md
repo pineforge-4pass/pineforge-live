@@ -155,8 +155,11 @@ available for native warmup but are excluded from live replay.
 This is live/batch equivalence verification, not a new campaign grade or gate.
 The optional canonical-grader diagnostic uses fixed live flags; it does not
 rerun the campaign's warmup/origin ladder, native higher-timeframe feed
-selection, or TV report-window/range-end projection. Regular `request.security`
-probes use the original 1m auxiliary history plus observed input minutes. If
+selection, or TV report-window/range-end projection. `request.security`
+calls proven to use only the chart timeframe use the native chart directly.
+Other or unresolved request timeframes retain the original 1m auxiliary
+history plus observed input minutes. The pinned compiler's parsed syntax
+determines this distinction; comments and string contents are not calls. If
 that history starts later than the native chart, its origin is the first
 complete shared chart opening determined from timestamps and session hours. Each result records the
 actual configuration and unavailable feed coverage. Unsupported or failed
@@ -165,7 +168,12 @@ Synthetic ticks represent explicit high-first and low-first models, not the
 unavailable historical exchange tick sequence.
 
 The replay window is the earliest eligible trade window under the declared
-input coverage policy. It retains every warmup bar from the effective history origin. The
+input coverage policy and must contain at least one positive-volume input
+minute. A quote-only window cannot verify the tick path. Results record the
+positive-volume minute count and actual generated tick count for each mode;
+passing tick modes require nonzero ticks as well as nonempty order actions.
+Zero-volume minutes remain unchanged and produce no fabricated ticks.
+The replay retains every warmup bar from the effective history origin. The
 worker also executes the native chart from the effective shared origin once;
 when reconstructed bars match native bars, their broker-state prefix must
 match that run. This

@@ -21,9 +21,10 @@ def test_direct_and_tick_event_writer_preserve_explicit_empty_quotes(tmp_path):
     minutes=[replace(minute(0),v=0),minute(1),minute(2)]
     for mode,policy,count in [('bars','direct',3),('ticks','high-first',11),('ticks','low-first',11)]:
         path=tmp_path/(mode+policy+'.jsonl')
-        case.write_events(path,minutes,'3',[(0,180_000)],mode,policy,1)
+        tick_count=case.write_events(path,minutes,'3',[(0,180_000)],mode,policy,1)
         rows=[json.loads(x) for x in path.read_text().splitlines()]
         assert len(rows)==count
+        assert tick_count==sum(x['type']=='tick' for x in rows)==(0 if mode=='bars' else 8)
         assert [x['bar']['v'] for x in rows if x['type']=='bar']==[0,4,4]
         assert rows[0]['type']=='bar' and rows[0]['bar']['h']==103
 
@@ -107,6 +108,7 @@ def test_verifier_runs_both_modes_real_http_and_restart_with_fake_decisions(tmp_
     monkeypatch.setitem(sys.modules,'source_trade_provenance',SimpleNamespace(validate_source_trade_pairing=lambda x:None))
     so=tmp_path/'fixture.so';so.write_bytes(b'FAKE LIBRARY - NEVER LOADED')
     monkeypatch.setattr(case,'compile_strategy',lambda x:so)
+    monkeypatch.setattr(case,'security_feed_plan',lambda *args:{'needed':auxiliary,'parser':'fixture'})
     source=tmp_path/'fixture.pine';source.write_text('// FAKE - never transpiled\n'+('value = request.security(syminfo.tickerid, "1", close)' if auxiliary else ''))
     minutes=[minute(i) for i in range(24)]
     agg=MinuteBarAggregator('3');parents=[]
@@ -115,7 +117,7 @@ def test_verifier_runs_both_modes_real_http_and_restart_with_fake_decisions(tmp_
     finer_start=6 if handle_type is FakeHandle and not auxiliary and not corrupt_actions else 0
     case.write_bars(chart,parents);case.write_bars(finer,minutes[finer_start:])
     output=tmp_path/'output';output.mkdir()
-    doc={'output':str(output),'evidence':{'strategy':str(source)},'lab':str(tmp_path),'engine':str(tmp_path),
+    doc={'output':str(output),'evidence':{'strategy':str(source)},'lab':str(tmp_path),'engine':str(tmp_path),'codegen':str(tmp_path),
          'probe':{'probe_id':'offline-fixture','symbol':'TEST:MOCK','timeframe':'3'},'template':{'environment':{}},
          'feeds':{'chart':str(chart),'finer':str(finer)},'replay_bars':2,'daily_replay_bars':2,
          'tick_policies':['high-first','low-first'],'seed':7}
@@ -127,6 +129,9 @@ def test_verifier_runs_both_modes_real_http_and_restart_with_fake_decisions(tmp_
     assert all(x['closed_trade_exit_quantity_equal'] is (not corrupt_actions) for x in result['modes'].values())
     assert set(result['modes'])=={'bars-direct','ticks-high-first','ticks-low-first'}
     assert all(x['actions']==expected_actions and x['restart_deliveries']==0 and x['input_minutes']==6 for x in result['modes'].values())
+    assert result['window']['positive_volume_minutes']==6
+    assert result['modes']['bars-direct']['tick_events']==0
+    assert all(result['modes'][name]['tick_events']==24 for name in ('ticks-high-first','ticks-low-first'))
 
 
 @pytest.mark.parametrize('metadata,chart_clock',[({},''),({'chart_timezone':''},''),({'chart_timezone':'Asia/Taipei'},'Asia/Taipei')])

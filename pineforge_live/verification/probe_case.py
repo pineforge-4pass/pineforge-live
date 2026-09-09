@@ -44,6 +44,7 @@ from pineforge_live.epoch import apply_epoch
 from pineforge_live.journal import Journal
 from pineforge_live.signals.runtime import run_signals
 from .cloud_io import canonical_json_bytes,file_identity
+from .security_plan import security_feed_plan
 
 
 def clean(value):
@@ -87,6 +88,17 @@ def timestamps(path):
         next(stream)
         result=[int(line.split(',',1)[0]) for line in stream if line.strip()]
     if any(b<=a for a,b in zip(result,result[1:])):raise ValueError('minute timestamps not strictly ordered')
+    return result
+
+
+def trade_minute_timestamps(path):
+    """Recorded positive-volume minutes, used only to ensure real tick coverage."""
+    result=[]
+    with Path(path).open() as stream:
+        for row in csv.DictReader(stream):
+            volume=float(row['volume'])
+            if not math.isfinite(volume) or volume<0:raise ValueError('invalid minute volume')
+            if volume>0:result.append(int(row['timestamp']))
     return result
 
 
@@ -187,8 +199,8 @@ def replay_calendar(chart,minute_ts,script_tf,*,session='24x7',timezone='UTC'):
     return ReplayCalendar(records,provenance)
 
 
-def choose_window(chart,minute_ts,calendar,trades,count,*,gap_policy='reject'):
-    eligible=[]
+def choose_window(chart,minute_ts,calendar,trades,count,*,gap_policy='reject',trade_minute_ts=None):
+    eligible=[];with_ticks=set()
     schedule=ParentWindows(calendar)
     for i,(_,end) in enumerate(schedule.windows):
         if i in getattr(calendar,'unknown_close_indices',()):continue
@@ -196,6 +208,8 @@ def choose_window(chart,minute_ts,calendar,trades,count,*,gap_policy='reject'):
         left=bisect_left(minute_ts,first);right=bisect_left(minute_ts,end)
         if (left<right and minute_ts[right-1]+60_000==end
                 and (gap_policy=='observed' or (minute_ts[left]==first and right-left==(end-first)//60_000))):eligible.append(i)
+        if trade_minute_ts is not None and bisect_left(trade_minute_ts,first)<bisect_left(trade_minute_ts,end):
+            with_ticks.add(i)
     available=set(eligible)
     # Preserve the effective shared history origin and test its earliest
     # covered trade window. Its complete native run remains the prefix oracle;
@@ -207,9 +221,10 @@ def choose_window(chart,minute_ts,calendar,trades,count,*,gap_policy='reject'):
         # represent its next forming bar without guessing a session opening.
         if end>=len(chart)-1:continue
         start=end-count+1
-        if start>=1 and all(i in available for i in range(start,end+1)):
+        if (start>=1 and all(i in available for i in range(start,end+1))
+                and (trade_minute_ts is None or any(i in with_ticks for i in range(start,end+1)))):
             return start,end+1
-    raise ValueError('no complete requested window shared by chart and minute feeds')
+    raise ValueError('no complete requested window shared by chart and minute feeds with required tick coverage')
 
 
 def _run(command,cwd=None,timeout=300):
@@ -313,13 +328,16 @@ def configure_handle(handle,config,observed=()):
 
 def write_events(path,minutes,script_tf,calendar,mode,policy,seed,*,gap_policy='reject'):
     generator=SyntheticMinuteTicks(policy,seed=seed,parent_windows=calendar,gap_policy=gap_policy) if mode=='ticks' else None
+    tick_count=0
     with Path(path).open('w') as stream:
         for bar in minutes:
             if mode=='ticks':
                 for tick in generator.push(bar).ticks:
                     stream.write(json.dumps({'type':'tick','ts':tick.ts,'seq':tick.seq,'price':tick.price,'qty':tick.qty},separators=(',',':'))+'\n')
+                    tick_count+=1
             row=asdict(bar);row.pop('is_forming')
             stream.write(json.dumps({'type':'bar','bar':row},separators=(',',':'))+'\n')
+    return tick_count
 
 
 def action_projection(row):
@@ -356,7 +374,9 @@ def verify(case):
     env=case['template']['environment'];runtime=metadata.get('runtime_overrides') or {}
     session=env.get('PINEFORGE_VERIFY_SESSION',runtime.get('session','24x7'))
     timezone=env.get('PINEFORGE_VERIFY_TIMEZONE',runtime.get('timezone','UTC'))
-    auxiliary=bool(re.search(r'\brequest\s*\.\s*security\s*\(',Path(case['evidence']['strategy']).read_text()))
+    security_plan=security_feed_plan(Path(case['evidence']['strategy']).read_text(),
+                                     case['probe']['timeframe'],case['codegen'])
+    auxiliary=security_plan['needed']
     original_chart_start=chart[0].ts_open
     # Both replay streams start at their common recorded-data origin. This
     # also covers a one-time entry that predates a later-starting finer feed.
@@ -389,7 +409,8 @@ def verify(case):
         if len(native.broker_state_hash)!=len(chart):raise RuntimeError('native reference hash coverage mismatch')
     native_control_ms=round((time.perf_counter()-native_started)*1000,3)
     count=case['daily_replay_bars'] if tf_ms(config.script_tf)>=86_400_000 else case['replay_bars']
-    start,end=choose_window(chart,minute_ts,calendar,native.trades,count,gap_policy=gap_policy)
+    start,end=choose_window(chart,minute_ts,calendar,native.trades,count,gap_policy=gap_policy,
+                            trade_minute_ts=trade_minute_timestamps(case['feeds']['finer']))
     minutes=read_bars(case['feeds']['finer'],calendar[start][0],calendar[end-1][1])
     # Limit input to declared active windows; no quotes from a closed session
     # are injected into a parent merely because they fall between sessions.
@@ -454,7 +475,7 @@ def verify(case):
     try:
         for mode,policy in [('bars','direct')]+[('ticks',p) for p in case['tick_policies']]:
             name=mode+'-'+policy;folder=output/name;folder.mkdir()
-            events=folder/'events.jsonl';write_events(events,minutes,config.script_tf,calendar,mode,policy,case['seed'],gap_policy=gap_policy)
+            events=folder/'events.jsonl';tick_events=write_events(events,minutes,config.script_tf,calendar,mode,policy,case['seed'],gap_policy=gap_policy)
             doc=dict(base,journal_path=str(folder/'signals.sqlite3'),input_mode=mode,
                      source={'kind':'jsonl','path':str(events)},webhook={'target_url':f'http://127.0.0.1:{server.server_port}/webhook','backoff_initial_ms':1,'backoff_max_ms':1})
             path=folder/'config.json';path.write_bytes(canonical_json_bytes(doc));mode_config=load_signal_config(path)
@@ -476,8 +497,9 @@ def verify(case):
                    **accounting,
                    'actions_equal':actions==expected,'hash_mismatches':hash_mismatches,'final_trades_equal':not trades_mismatch,
                    'duplicate_event_ids':duplicate_ids,'restart_deliveries':len(received)-before_restart,
-                   'script_bars':len(settlements),'input_minutes':len(input_rows),'input_events_sha256':file_identity(events)['sha256']}
-            entry['ok']=not primed['error'] and not report['error'] and not restarted['error'] and actions==expected and all(accounting.values()) and not hash_mismatches and not trades_mismatch and duplicate_ids==0 and entry['restart_deliveries']==0 and len(settlements)==len(derived) and len(input_rows)==len(minutes)
+                   'script_bars':len(settlements),'input_minutes':len(input_rows),'tick_events':tick_events,
+                   'input_events_sha256':file_identity(events)['sha256']}
+            entry['ok']=not primed['error'] and not report['error'] and not restarted['error'] and actions==expected and all(accounting.values()) and not hash_mismatches and not trades_mismatch and duplicate_ids==0 and entry['restart_deliveries']==0 and len(settlements)==len(derived) and len(input_rows)==len(minutes) and (mode!='ticks' or tick_events>0)
             modes[name]=entry
             (folder/'received.json').write_bytes(canonical_json_bytes(actual))
             # Keep bounded artifacts; raw generated ticks are reproducible
@@ -502,8 +524,9 @@ def verify(case):
             'native_prefix_equal':None if native_prefix_mismatches is None else not native_prefix_mismatches,
             'native_prefix_mismatches':None if native_prefix_mismatches is None else native_prefix_mismatches[:10],
             'window':{'start_index':start,'end_index_exclusive':end,'history_bars':start,'replay_bars':end-start,
-                      'selection':'earliest eligible trade window; shared recorded-data origin retained',
+                      'selection':'earliest eligible trade window containing positive-volume input; shared recorded-data origin retained',
                       'input_gap_policy':gap_policy,'unsupplied_minute_slots':sum((b-a)//60000 for a,b in active)-len(minutes),
+                      'positive_volume_minutes':sum(b.v>0 for b in minutes),
                       'first_minute':minutes[0].ts_open,'last_minute':minutes[-1].ts_open,'minutes':len(minutes)},
             'calendar':{'rule':'native labels, script timeframe and declared session/IANA clock; endpoints independent of supplied minute rows',
                         'sha256':file_identity(calendar_path)['sha256'],
@@ -517,6 +540,7 @@ def verify(case):
             'configuration':{'chart_timezone':base['chart_timezone'],'syminfo':base['syminfo'],
                              'inputs':base['inputs'],'overrides':base['overrides'],'ohlcv_start_ms':metadata.get('ohlcv_start_ms'),
                              'auxiliary_history':auxiliary_receipt,
+                             'security_feed_plan':security_plan,
                              'original_chart_start_ms':original_chart_start,'effective_chart_start_ms':chart[0].ts_open,
                              'auxiliary_feeds':'original 1m warmup plus observed input minutes' if auxiliary else 'not requested',
                              'bar_magnifier':False,'realtime_tail':True,'horizon_bars':base['horizon_bars'],

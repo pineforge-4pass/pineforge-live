@@ -56,6 +56,24 @@ def test_intraday_close_can_use_an_independent_earlier_native_open():
  assert all(row['close_source']=='native-next-open/script-timeframe' for row in calendar.provenance)
 
 
+def test_window_requires_trade_ticks_but_keeps_zero_volume_minutes():
+ chart=[bar(i*180000) for i in range(8)]
+ stamps=list(range(0,8*180000,60000));calendar=replay_calendar(chart,stamps,'3')
+ trades=[SimpleNamespace(exit_bar_index=i,open_at_end=False) for i in (2,5)]
+ assert choose_window(chart,stamps,calendar,trades,2)==(1,3)
+ assert choose_window(chart,stamps,calendar,trades,2,trade_minute_ts=[5*180000])==(4,6)
+ with pytest.raises(ValueError,match='required tick coverage'):
+  choose_window(chart,stamps,calendar,trades,2,trade_minute_ts=[])
+
+
+def test_trade_tick_coverage_must_fall_inside_an_active_window():
+ chart=[bar(i*360000) for i in range(5)]
+ calendar=[(b.ts_open,b.ts_open+180000) for b in chart]
+ stamps=[t for start,end in calendar for t in range(start,end,60000)]
+ with pytest.raises(ValueError,match='required tick coverage'):
+  choose_window(chart,stamps,calendar,[],2,trade_minute_ts=[3*360000-60000])
+
+
 def test_declared_overnight_daily_close_preserves_dst_and_missing_tail():
  zone='America/New_York'
  chart=[bar(ms(f'2026-03-{day:02d}T17:00',zone)) for day in range(6,10)]

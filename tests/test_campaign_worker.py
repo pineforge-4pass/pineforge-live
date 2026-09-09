@@ -102,7 +102,7 @@ def successful_case(command, *, stdout_path, stderr_path, timeout):
     Path(stdout_path).write_text("fake case\n")
     Path(stderr_path).write_text("")
     report = {"status": "passed", "live_backtest_equal": True, "batch_actions_in_window": 1,
-              "modes": {name: {"ok": True} for name in
+              "modes": {name: {"ok": True, "tick_events": 4 if name.startswith('ticks-') else 0} for name in
                         ["bars-direct", *("ticks-"+p for p in config["tick_policies"])]}}
     (Path(config["output"])/"result.json").write_bytes(canonical_json_bytes(report))
     return 0
@@ -221,9 +221,18 @@ def test_pass_requires_all_modes_and_cannot_replace_identity():
 def test_pass_requires_nonempty_order_action_evidence(count):
     report = {"status": "passed", "live_backtest_equal": True,
               "batch_actions_in_window": count,
-              "modes": {name: {"ok": True} for name in ("bars-direct", "ticks-high-first")}}
+              "modes": {name: {"ok": True, "tick_events": 4} for name in ("bars-direct", "ticks-high-first")}}
     with pytest.raises(RuntimeError, match="every requested mode"):
         worker._merge_report({"probeId": "p"}, report, 0, ["high-first"])
+
+
+@pytest.mark.parametrize('count',[0,-1,None,True])
+def test_tick_mode_cannot_pass_without_actual_trade_ticks(count):
+    report={'status':'passed','live_backtest_equal':True,'batch_actions_in_window':1,
+            'modes':{'bars-direct':{'ok':True,'tick_events':0},
+                     'ticks-high-first':{'ok':True,'tick_events':count}}}
+    with pytest.raises(RuntimeError,match='every requested mode'):
+        worker._merge_report({'probeId':'p'},report,0,['high-first'])
 
 
 def test_process_timeout_kills_process_group_and_waits(monkeypatch, tmp_path):
