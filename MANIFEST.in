@@ -1,4 +1,4 @@
-include LICENSE NOTICE README.md ledger.md
+include LICENSE NOTICE README.md CONTRIBUTING.md CHANGELOG.md ledger.md
 recursive-include docs *.md *.json
 recursive-include examples *.py *.json
 recursive-include scripts *.py *.sh *.mjs

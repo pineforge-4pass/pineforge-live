@@ -2,9 +2,16 @@ __pycache__/
 *.pyc
 .pytest_cache/
 build/
+dist/
+.venv/
+.venv-*/
+.env
+.env.*
+!.env.example
 *.egg-info/
 .superpowers/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
 *.stop
+.DS_Store

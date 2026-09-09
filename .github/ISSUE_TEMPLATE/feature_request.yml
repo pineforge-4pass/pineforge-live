@@ -1,0 +1,23 @@
+name: Feature request
+description: Suggest an improvement to the broker-neutral runtime or developer experience.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Describe what you are trying to do and what currently prevents it.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the expected input, output or workflow. Explain how a feed or broker integration can preserve the shared contract.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and context
+      description: Include any workarounds or examples. Omit credentials and private strategy/account information.

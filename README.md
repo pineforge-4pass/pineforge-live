@@ -315,12 +315,10 @@ execution acknowledgments belong to your receiver or broker bridge.
 ## Contributing
 
 Bug reports, documentation fixes, feed adapters and replay cases are welcome.
-Include the package/engine versions, input mode, a minimal strategy or fixture,
-and the expected and actual behavior. Remove credentials and private account
-information from configuration and logs. For code changes, run the relevant
-local tests described above and explain any engine-backed tests that skipped.
-Maintainer campaign tooling is documented separately in [cloudrun/](cloudrun/README.md);
-it is not required to install, use or contribute to the runtime.
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, PR scope and
+contribution licensing. The [changelog](CHANGELOG.md) tracks release changes.
+Maintainer campaign tooling is separate; cloud access is not required to use
+the runtime or submit a contribution.
 
 ## License
 
@@ -335,7 +333,7 @@ The components in a PineForge setup have separate licenses:
 |---|---|
 | **pineforge-live** | [Apache-2.0](LICENSE): this Python runtime, its examples and documentation. |
 | **pineforge-engine** | [Apache-2.0](https://github.com/pineforge-4pass/pineforge-engine/blob/main/LICENSE): the C++ engine, distributed separately. |
-| **pineforge-codegen-oss** | [PolyForm Noncommercial 1.0.0 with supplemental terms](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE): source-available, **not OSI open source**. Personal own-account/own-capital trading is permitted. Organizational use, managing third-party capital, and embedding the compiler or its output in a product/service require a commercial license under those terms. |
+| **pineforge-codegen-oss** | [PolyForm Noncommercial 1.0.0 with supplemental terms](https://github.com/pineforge-4pass/pineforge-codegen-oss/blob/main/LICENSE): source-available, **not OSI open source**. Personal own-account/own-capital trading is permitted. Organizational use, managing third-party capital, embedding the compiler or its output in a product/service, and hosted/SaaS/public-facing use require a commercial license under those terms. |
 
 The runtime's Apache license does not grant rights to the compiler, generated
 strategies, third-party strategy sources or market data. Review codegen's

@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible runtime, feed, webhook or packaging problem.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Include a small reproduction using synthetic data when possible. Remove secrets, authorization headers, account identifiers and private strategy code from logs and configuration before posting.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Expected and actual behavior
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions and environment
+      description: Include the PineForge Live commit or version, Python version, operating system, and engine commit/ABI when relevant.
+      placeholder: |
+        PineForge Live:
+        Python:
+        Operating system:
+        Engine commit / ABI:
+    validations:
+      required: true
+  - type: dropdown
+    id: feed
+    attributes:
+      label: Feed mode
+      options:
+        - 1m OHLCV bars
+        - Ticks with confirmed 1m boundaries
+        - Script-timeframe bars or ticks (mixed mode)
+        - Other / not applicable
+    validations:
+      required: true
+  - type: dropdown
+    id: trigger
+    attributes:
+      label: Trigger mode
+      options:
+        - settled
+        - intrabar
+        - Not applicable
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the commands, a minimal sanitized configuration and a small input sample. State whether this is a fresh journal, replay or restart.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs and report
+      description: Include the relevant error and .report.json fields. Do not post secrets, broker credentials or personal/account data.
+      render: text
