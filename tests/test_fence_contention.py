@@ -18,9 +18,9 @@ This module now separates the two concerns:
     itself (via `a._flock()`) while a child process attempts `acquire()`
     on the same lock/journal, and we assert on wall-clock time that the
     child was genuinely blocked. The second test is the control: with the
-    child's `_flock()` neutered, it returns fast -- proving the first
-    test would fail (not pass vacuously) if `_flock()`'s exclusion were
-    ever removed from `fence.py`.
+    child's `_flock()` neutered, it must finish while the parent still holds
+    the lock. This confirms the child can otherwise acquire without waiting
+    for the parent's release, without a machine-speed threshold.
 """
 from __future__ import annotations
 import select, subprocess, sys, textwrap, time
@@ -140,25 +140,22 @@ def test_child_process_blocks_on_flock_while_parent_holds_it(tmp_path):
 def test_child_process_without_flock_does_not_block_control(tmp_path):
     # R1's control: with the CHILD's `_flock()` neutered to a no-op (while
     # the parent still genuinely holds the OS lock), the child never
-    # contends and returns fast. This proves the previous test is
-    # discriminating -- if `_flock()`'s exclusion were ever removed from
-    # `fence.py` for real, that test's >= 0.4s assertion would fail rather
-    # than passing vacuously.
+    # contends and completes before the parent releases its lock. Holding
+    # that lock throughout subprocess.run is the control; a fixed sub-second
+    # latency threshold instead measures scheduler/filesystem speed on CI.
     j_path = tmp_path / "j.sqlite3"
     lock = tmp_path / "j.lock"
     j = Journal.open(j_path)
     a = FencedLease(lock, j)
 
     child_code = textwrap.dedent(f"""
-        import contextlib, time
+        import contextlib
         from pineforge_live.journal import Journal, FencedLease
         FencedLease._flock = lambda self: contextlib.nullcontext()
         j = Journal.open({str(j_path)!r}, create=False)
         b = FencedLease({str(lock)!r}, j)
-        t0 = time.monotonic()
         token = b.acquire(lease_ms=1_000, now_ms=0)
-        elapsed = time.monotonic() - t0
-        print(f"ACQUIRED:{{token}}:{{elapsed:.3f}}")
+        print(f"ACQUIRED:{{token}}")
         j.close()
     """)
 
@@ -166,8 +163,6 @@ def test_child_process_without_flock_does_not_block_control(tmp_path):
         result = subprocess.run(
             [sys.executable, "-c", child_code], capture_output=True, text=True, timeout=15,
         )
-    assert result.returncode == 0, result.stderr
-    marker, token_str, elapsed_str = result.stdout.strip().split(":")
-    assert marker == "ACQUIRED", (result.stdout, result.stderr)
-    assert float(elapsed_str) < 0.2, f"child should not have blocked (flock neutered): {result.stdout}"
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "ACQUIRED:1", (result.stdout, result.stderr)
     j.close()
