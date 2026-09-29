@@ -9,7 +9,8 @@ is what makes the whole thing testable against a recorded tape
 the tests and the harness call their venue `"TAPE"`.
 
 Spec: `pineforge-workflow-live/docs/superpowers/specs/2026-09-07-pineforge-live-design.md`
-(§4 is the algorithm, §5.4 the reconciler, §5.5 STOP/RiskGuard, §1 the G-invariants).
+(§4 is the algorithm, §5.4 the reconciler, §5.5 STOP/RiskGuard, §1 the G-invariants),
+a maintainer design document that is not published.
 
 ## The one invariant everything else serves
 
@@ -384,4 +385,5 @@ same way (`report["seed"]`, exit 1) rather than dying with a message, and a
 recompute that aborts twice ends the run with a written summary instead of a
 traceback on the next bar's `LedgerGap`. Recompute times are float milliseconds:
 a probe run can be sub-millisecond, and spec §2 sizes `grace` off their p99.
-See the README for the commands and the current numbers.
+Run `python scripts/l1_harness.py --help` for its options; it needs the
+ABI-v4 engine build from the README's Install section.

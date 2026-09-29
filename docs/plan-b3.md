@@ -5,13 +5,16 @@
 > the runner. Broker adapters, account admission, mirror/dead-man execution
 > and production exchange evidence below are not requirements of the public
 > signal runtime. The current contract is [webhooks.md](webhooks.md).
+> Modules and tests named below that are absent from the tree were never
+> implemented.
 
 Status: implementation plan, 2026-09-09. This continues the approved live
 design and B2 at `1a3a6fb`; it is not evidence that an exchange integration
 has passed admission. Local implementation and fault simulation can proceed.
 Do not push or enable a production account as part of this continuation.
 
-Authority: sibling `pineforge-workflow-live/docs/superpowers/specs/2026-09-07-pineforge-live-design.md`,
+Authority: sibling `pineforge-workflow-live/docs/superpowers/specs/2026-09-07-pineforge-live-design.md`
+(a maintainer design document that is not published),
 especially §§2–2a, 4–7; its B2 ledger's post-archive ruling and TODO 8–17;
 and this repository's [core design](core.md). The post-archive FLATTEN
 exemption supersedes the older spec sentence that budgets that flatten.

@@ -77,7 +77,8 @@ python -m build
 python -m twine check --strict dist/*
 ```
 
-The wheel contains the runtime, metadata, `LICENSE` and `NOTICE`. The source
+The wheel contains the `pineforge_live` package (including its maintainer
+`verification` modules), metadata, `LICENSE` and `NOTICE`. The source
 distribution also includes examples, guides, tests and maintainer scripts.
 Keep local build artifacts, journals, credentials and private campaign inputs
 out of both distributions. See [release preparation](docs/releasing.md) for
