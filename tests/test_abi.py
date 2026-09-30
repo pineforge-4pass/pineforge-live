@@ -107,10 +107,11 @@ def test_abort_returns_not_completed(test_so, test_feed):
     # Full feed (~222k bars). Building the BarC array first takes ~110ms, so
     # a request made before run_full() reaches the C call would be discarded
     # by the idle engine. Engine v1.0.0 also discards a request that arrives
-    # inside the C call before the run begins: it copies and checks the bars
-    # first (more than 3ms for this feed in a fresh process), then consumes
-    # any pending request. So request the abort repeatedly from the C call's
-    # entry until it returns; a request made after the run begins is observed.
+    # inside the C call before the run begins: the run's begin consumes any
+    # pending request, and for this feed it comes more than 3ms after the
+    # call in a fresh process. So request the abort repeatedly from the C
+    # call's entry until it returns; a request made after the run begins is
+    # observed.
     bars = load_bars(test_feed)
     with EngineHandle(test_so) as h:
         original_run = h.lib.run_backtest_full

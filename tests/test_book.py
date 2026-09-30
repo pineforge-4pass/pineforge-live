@@ -165,6 +165,20 @@ def test_settled_book_normal_read_is_unaffected_by_the_stale_raise():
     bk = B.settled_book(h, R())
     assert bk["x|EXIT||1"].level_resolved is False and bk["x|EXIT||1"].stop is None
 
+def test_settled_book_refuses_a_market_entry_the_accessor_prices():
+    # `ids.intent_kind` finds a market entry by the mirror row's
+    # limit_price/stop_price, fields engine v1.0.0 marks deprecated. A priced
+    # entry whose row stopped carrying them would key as MARKET and go to the
+    # venue at the next open as a market order; the handle's own levels
+    # expose that contradiction, so it must raise instead.
+    class R:
+        pending_orders = [_po(type=1, stop_price=float("nan"))]
+    priced = _FakeHandle({0: ((0, 101.5, float("nan"), float("nan")), 1)})
+    with pytest.raises(RuntimeError):
+        B.settled_book(priced, R())
+    market = _FakeHandle({0: ((0, float("nan"), float("nan"), float("nan")), 1)})
+    assert B.settled_book(market, R())["x|MARKET||1"].is_market
+
 def test_settled_book_from_engine(test_so, test_feed, tmp_path):
     spec = corpus_spec(); h = make_handle(test_so, spec); j, _ = open_journal(tmp_path); j.append_epoch(spec.epoch_hash(), "{}")
     L = Ledger(h, spec, j, "rc"); s = L.seed(load_bars(test_feed, 3000))   # 3000 bars: the probe holds ≥1 pending order here

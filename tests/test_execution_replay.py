@@ -52,5 +52,6 @@ def test_an_orders_on_close_entry_without_a_pine_id_is_refused(test_so_pooc, tes
     # report and places neither of its legs.
     report = asyncio.run(execute_tape(so=test_so_pooc, feed=test_feed, journal_dir=tmp_path, bars=60))
     assert report['error'] == 'ExecutionSafetyError: ambiguous entry intent cannot become a venue order'
+    assert report['summary']['bars'] == 48 and report['bars'][-1]['bar_index'] == 2047   # settled up to the flip bar
     assert report['summary']['physical_orders'] == 0 and report['summary']['action_receipts'] == 0
     assert json.loads((tmp_path / 'execution-report.json').read_text())['error'] == report['error']

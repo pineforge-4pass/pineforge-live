@@ -79,7 +79,7 @@ scripts/build_engine.sh
 ```
 
 Use engine release v1.0.0 (commit
-`5718c5dc05086fc5b66b4cb565617efe837131e3`), which provides ABI v4. All 151
+`5718c5dc05086fc5b66b4cb565617efe837131e3`), which provides ABI v4. All 152
 engine-backed tests pass with it and the demo below delivers its actions
 (checked on Linux arm64, 2026-09-30). Releases up to v0.13.1 provide ABI v3
 or older, and their strategy libraries are refused at load. CMake 3.16+, a

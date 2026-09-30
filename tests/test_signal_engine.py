@@ -46,6 +46,8 @@ def test_settled_signals_equal_backtest_fill_sequence(request,fixture,test_feed,
     assert actual==expected
     assert all(r['payload']['event']=='order_action' and r['payload']['status']=='confirmed' for r in engine.outbox.inspect())
     assert all(r['payload']['order']['identity_resolved']==(r['payload']['order']['id'] is not None) for r in engine.outbox.inspect())
+    # The four POOC flips in this window (bars 2048, 2072, 2144, 2168); every other fill names its order.
+    assert sum(r['payload']['order']['id'] is None for r in engine.outbox.inspect())==(4 if fixture=='test_so_pooc' else 0)
     engine.h.close();engine.j.close()
 
 

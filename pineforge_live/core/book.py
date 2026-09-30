@@ -3,7 +3,7 @@ from __future__ import annotations
 import enum, math
 from dataclasses import dataclass
 from pineforge_live.types import canonical_sha256
-from .ids import IntentKey, intent_key_for
+from .ids import IntentKey, intent_key_for, order_type_name
 
 class IntentState(enum.Enum):
     """One intent's transition between two consecutive settled books
@@ -79,10 +79,19 @@ def settled_book(handle, result) -> dict[str, Intent]:
     Each row is keyed by its OWN `created_position_cycle_seq` (spec §4:
     key = `(id, kind, from_entry, created_position_cycle_seq)`), not by
     the book's current `result.cycle_seq` -- a resting order can survive
-    a flat->long->flat cycle unfilled (created while broker-flat,
-    `created_position_cycle_seq == 0`) and must keep the SAME key once
-    the position opens and `result.cycle_seq` moves on, or it reads as a
-    fresh order (`RESTING`) instead of the same one continuing to rest.
+    a flat->long->flat cycle unfilled (created while broker-flat, where
+    the pre-1.0 engine stamps cycle 0 and engine v1.0.0 the last position
+    cycle) and must keep the SAME key once the position opens and
+    `result.cycle_seq` moves on, or it reads as a fresh order (`RESTING`)
+    instead of the same one continuing to rest. Engine v1.0.0 replaces a
+    same-id re-issue with a new order stamped with the cycle it is placed
+    in, so a re-issue in a later cycle than the original reads as a new key.
+
+    A MARKET key the engine reported as an ENTRY (see `ids.intent_kind`)
+    is checked against the handle's own levels: a finite stop or limit
+    there means the mirror row lost the levels the key was derived from,
+    and treating the order as a market entry would send it at the next
+    open, so that raises `RuntimeError` too.
 
     Contract: MUST be called with the SAME `handle` that produced `result`
     -- immediately after the `run_full()` call that produced it (see
@@ -111,6 +120,10 @@ def settled_book(handle, result) -> dict[str, Intent]:
                                f"effective_levels rc={rc}, level_resolved={lr} -- settled_book() must be called "
                                "immediately after the run_full() that produced `result`, before any later run_full()")
         stop, limit, act = _num(stop), _num(limit), _num(act)
+        if key.kind == "MARKET" and order_type_name(int(po["type"])) == "ENTRY" and (stop is not None or limit is not None):
+            raise RuntimeError(f"settled_book: {key.s!r} (mirror index {i}) has no limit/stop level in its mirror row "
+                               f"but effective_levels reports stop={stop}, limit={limit} -- refusing to treat a priced "
+                               "entry as a market entry")
         resolved = lr == 1
         created_bar = int(po["created_bar"])
         qty, qty_percent = _num(po["qty"]), _num(po["qty_percent"])
