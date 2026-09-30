@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Supports PineForge engine v1.0.0 and codegen 1.0.0; the README builds
+  against the engine's `v1.0.0` tag and names codegen 1.0.0 as its pair.
+- Engine v1.0.0 reports every `strategy.entry` as ENTRY in the pending-order
+  mirror. An entry with neither a limit nor a stop level is still keyed as a
+  MARKET intent, so market entries keep their settle-time `MARKET_AT_OPEN`
+  legs and intent keys.
+
 ## 0.1.0 — 2026-09-09 (pre-alpha)
 
 Initial standalone, pre-alpha runtime for PineForge-compiled strategies.

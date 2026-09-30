@@ -71,44 +71,38 @@ To build the public engine and its example strategy corpus:
 ```sh
 git lfs install
 git clone https://github.com/pineforge-4pass/pineforge-engine.git ../pineforge-engine
-git -C ../pineforge-engine checkout --detach 399eeadaa34cdbae0e30829f0a6c1dbe900cdfa0
+git -C ../pineforge-engine checkout --detach v1.0.0
 git -C ../pineforge-engine submodule update --init corpus
 git -C ../pineforge-engine/corpus lfs pull
 export PINEFORGE_ENGINE_ROOT="$(cd ../pineforge-engine && pwd)"
 scripts/build_engine.sh
 ```
 
-Use the pinned engine revision. The pin
-`399eeadaa34cdbae0e30829f0a6c1dbe900cdfa0` is an unreleased ABI-v4 commit on
-the engine's `main` branch, 111 commits after v0.13.1 and before v1.0.0;
-two-input probe verification used it, and all engine-backed tests pass with
-it. **Engine v1.0.0 support is pending.** v1.0.0, the latest release, also
-provides ABI v4 and the demo below runs against it, but 22 of the 151
-engine-backed tests fail with it (checked on Linux arm64, 2026-09-30). The
-runtime loads v1.0.0 strategy libraries without error, so build against the
-pin until support lands.
-Releases up to v0.13.1 provide ABI v3 or older, and their strategy libraries
-are refused at load. CMake 3.16+, a C++17 compiler and Git LFS are
-required; the corpus feed is a 176 MB LFS object. Initial setup needs network
-access for the corpus data and engine build dependencies. The build script
-requires `PINEFORGE_ENGINE_ROOT` explicitly and compiles the public corpus,
-which can take several minutes. Keep the corpus revision pinned by the engine.
+Use engine release v1.0.0 (commit
+`5718c5dc05086fc5b66b4cb565617efe837131e3`), which provides ABI v4. All 151
+engine-backed tests pass with it and the demo below delivers its actions
+(checked on Linux arm64, 2026-09-30). Releases up to v0.13.1 provide ABI v3
+or older, and their strategy libraries are refused at load. CMake 3.16+, a
+C++17 compiler and Git LFS are required; the corpus feed is a 176 MB LFS
+object. Initial setup needs network access for the corpus data and engine
+build dependencies. The build script requires `PINEFORGE_ENGINE_ROOT`
+explicitly and compiles the public corpus, which can take several minutes.
+Keep the corpus revision pinned by the engine.
 
 For your own PineScript source, use
 [pineforge-codegen-oss](https://github.com/pineforge-4pass/pineforge-codegen-oss)
-to generate C++, then compile it against the pinned engine. The recorded
-verification paired the engine revision above with codegen revision
-`0fe2189f2cb845cc7371ce56dd55ad9cff72dda0`, three commits after v0.10.4 and
-before v1.0.0; install it with
-`python -m pip install 'git+https://github.com/pineforge-4pass/pineforge-codegen-oss@0fe2189f2cb845cc7371ce56dd55ad9cff72dda0'`.
-Codegen 1.0.0 output does not compile against the pinned
-engine: it includes `pineforge/source/pine_strategy_host.hpp`, which the
-engine added after the pin, and codegen 1.0.0 is supported only with engine
-v1.0.0. The compiler is
-a separate source-available project with commercial-use restrictions; read
-the [license summary](#license) before using the compiler or its output in a
-product or service. The corpus demo uses already-generated C++ and does not
-run the PineScript compiler.
+(PyPI package `pineforge-codegen`) to generate C++, then compile it against
+the headers and `libpineforge.a` of the same engine build. A codegen 1.x
+release is supported only with the engine tag of the same version, so use
+codegen 1.0.0 with engine v1.0.0:
+`python -m pip install 'pineforge-codegen==1.0.0'`. Its output includes
+`pineforge/source/pine_strategy_host.hpp`, which engines before v1.0.0 do not
+have. Codegen 1.0.0 output for the corpus SMA and ATR bracket strategies,
+compiled this way, delivers the same webhook actions as the corpus libraries.
+The compiler is a separate source-available project with commercial-use
+restrictions; read the [license summary](#license) before using the compiler
+or its output in a product or service. The corpus demo uses already-generated
+C++ and does not run the PineScript compiler.
 
 ## Run a complete local example
 
@@ -297,7 +291,8 @@ input; 27 also matched native chart OHLCV, while 8 had source-data differences.
 This measures live-versus-batch equivalence, not TradingView parity. The
 report pins the tested live, engine and codegen commits and the hashes of the
 inputs, container image and case artifacts; those artifacts, the image and
-the independent review are not public.
+the independent review are not public. It was recorded on 2026-09-09 with
+the pre-1.0 engine and codegen revisions it names, not with v1.0.0.
 
 ```sh
 python -m pip install -e '.[dev,websocket]'

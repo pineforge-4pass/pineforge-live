@@ -233,7 +233,10 @@ trade legs carry the engine's recorded fill price. A still-open position
 delta uses the engine's resulting average entry price; with pyramiding that
 can be a blended basis rather than the incremental order's individual price.
 When the Pine order ID cannot be uniquely resolved, `id` is `null` and
-`identity_resolved` is `false`.
+`identity_resolved` is `false`. A `process_orders_on_close` entry that fills
+at the close of the bar that placed it is one case: it never rests between
+bars, so only its position change reaches the runtime. With engine v1.0.0
+this includes a stop entry that flips a position closed on the same bar.
 
 With intrabar alerts enabled, the first event has `status: "provisional"`.
 Later events use `event: "order_update"`, include `original_event_id`, and
