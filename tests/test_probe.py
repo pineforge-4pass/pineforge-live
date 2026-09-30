@@ -358,7 +358,8 @@ def test_delta_fill_attributes_the_order_that_left_the_book_not_the_lowest_index
 
     book = dict([it("L1", 0), it("L2", 1)])
     # The mirror after the run: L1 still resting, L2 gone (it filled).
-    resting_l1 = [{"id": "L1", "type": 1, "from_entry": "", "created_position_cycle_seq": 0, "index": 0}]
+    resting_l1 = [{"id": "L1", "type": 1, "from_entry": "", "created_position_cycle_seq": 0, "index": 0,
+                   "limit_price": float("nan"), "stop_price": 100.0}]
 
     def run_result() -> RunResult:
         return RunResult(status=0, trades=[], net_profit=0.0, script_bars_processed=n + 1, broker_state_hash=[],
@@ -393,8 +394,10 @@ def test_the_dual_entry_guard_reads_the_engines_own_path_report(monkeypatch):
                              1.0, None, False, False, content_hash(None, None, None, is_long, 1.0))
 
     book = dict([it("L", True, 0), it("S", False, 1)])
-    resting = [{"id": "L", "type": 1, "from_entry": "", "created_position_cycle_seq": 0, "index": 0},
-               {"id": "S", "type": 1, "from_entry": "", "created_position_cycle_seq": 0, "index": 1}]
+    resting = [{"id": "L", "type": 1, "from_entry": "", "created_position_cycle_seq": 0, "index": 0,
+                "limit_price": float("nan"), "stop_price": 105.0},
+               {"id": "S", "type": 1, "from_entry": "", "created_position_cycle_seq": 0, "index": 1,
+                "limit_price": float("nan"), "stop_price": 95.0}]
 
     def run_result(path: int) -> RunResult:
         # L filled (it leaves the mirror); S stays resting.
