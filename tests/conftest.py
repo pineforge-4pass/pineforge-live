@@ -40,6 +40,19 @@ def test_feed(engine_root: Path) -> Path:
     return p
 
 @pytest.fixture(scope="session")
+def test_so_dual_stop(engine_root: Path) -> Path:
+    """The corpus dual-stop probe (`order-dual-stop-far-only-01`): a long
+    and a short stop entry placed while flat rest in the pending-order
+    mirror as priced ENTRY rows -- the fixture for "a priced entry is not a
+    market entry". No `inputs.json`: the default 15m ETH-USDT feed and the
+    same `"TAPE"` syminfo as the other probes."""
+    hits = glob.glob(str(engine_root / "corpus/validation/order-dual-stop-far-only-01/strategy.*"))
+    hits = [h for h in hits if h.endswith((".dylib", ".so"))]
+    if not hits:
+        pytest.skip("corpus strategy library not built; run scripts/build_engine.sh")
+    return Path(hits[0])
+
+@pytest.fixture(scope="session")
 def test_so_pooc(engine_root: Path) -> Path:
     """The corpus POOC probe (`order-deferred-flip-pooc-cross-bar-01`):
     `process_orders_on_close=true`, so its `strategy.close` market exit

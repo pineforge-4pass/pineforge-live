@@ -6,6 +6,9 @@ codegen source arrive through SHA-pinned Git bundles at runtime; the worker must
 check out their declared commits, verify trees, and compile them on Cloud Run.
 Codegen currently has no third-party runtime dependencies. No arbitrary remote
 Git branch or unpinned runtime installation belongs in this path.
+This is maintainer tooling: it needs the private `pineforge-lab` and
+`pineforge-workflow` repositories and a Google Cloud project with an evidence
+bucket. The public runtime and its tests need none of these.
 
 All real-probe backtests, both streaming modes, webhook verification and grading
 run inside Cloud Run. Local packaging, pure unit tests and compilation are not

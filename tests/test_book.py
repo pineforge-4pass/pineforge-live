@@ -165,6 +165,20 @@ def test_settled_book_normal_read_is_unaffected_by_the_stale_raise():
     bk = B.settled_book(h, R())
     assert bk["x|EXIT||1"].level_resolved is False and bk["x|EXIT||1"].stop is None
 
+def test_settled_book_refuses_a_market_entry_the_accessor_prices():
+    # `ids.intent_kind` finds a market entry by the mirror row's
+    # limit_price/stop_price, fields engine v1.0.0 marks deprecated. A priced
+    # entry whose row stopped carrying them would key as MARKET and go to the
+    # venue at the next open as a market order; the handle's own levels
+    # expose that contradiction, so it must raise instead.
+    class R:
+        pending_orders = [_po(type=1, stop_price=float("nan"))]
+    priced = _FakeHandle({0: ((0, 101.5, float("nan"), float("nan")), 1)})
+    with pytest.raises(RuntimeError):
+        B.settled_book(priced, R())
+    market = _FakeHandle({0: ((0, float("nan"), float("nan"), float("nan")), 1)})
+    assert B.settled_book(market, R())["x|MARKET||1"].is_market
+
 def test_settled_book_from_engine(test_so, test_feed, tmp_path):
     spec = corpus_spec(); h = make_handle(test_so, spec); j, _ = open_journal(tmp_path); j.append_epoch(spec.epoch_hash(), "{}")
     L = Ledger(h, spec, j, "rc"); s = L.seed(load_bars(test_feed, 3000))   # 3000 bars: the probe holds ≥1 pending order here
@@ -178,7 +192,9 @@ def test_settled_book_from_engine(test_so, test_feed, tmp_path):
     # `settled_book` now reads strictly (po[...], not po.get(...)) -- a
     # mirror rename must fail this test loudly, not silently mirror a
     # half-position close as closePosition=true.
-    for field in ("qty", "qty_percent", "requested_partial", "full_percent_exit_request"):
+    # `ids.intent_kind` reads limit_price/stop_price strictly to find a
+    # market entry, so pin those two as well.
+    for field in ("qty", "qty_percent", "requested_partial", "full_percent_exit_request", "limit_price", "stop_price"):
         assert field in s.pending_orders[0]
     bk = B.settled_book(h, s)
     assert len(bk) == len(s.pending_orders) >= 1
@@ -209,41 +225,52 @@ def test_settled_book_from_bracket_probe_holds_a_non_market_intent(test_so_brack
 
 def test_settled_book_keys_by_created_cycle_seq_across_a_flat_to_long_transition(test_so_bracket, test_feed, tmp_path):
     # Review finding 1 (Medium, plan-vs-spec deviation): an exit order
-    # created while the book was flat (`created_position_cycle_seq == 0`)
-    # must keep the SAME IntentKey once the entry that follows it fills and
-    # `result.cycle_seq` moves on to a new (nonzero) cycle -- keying by
-    # `result.cycle_seq` instead re-keys it and reads as a brand-new order.
-    # Verified live on `ta-pivot-atr-stop-target-01`/the 15m ETH feed: `XL`
-    # (an ATR-stop EXIT bracket for the `Long` entry) is created flat at bar
-    # 2004 and the `Long` MARKET entry fills on bar 2005 (cycle_seq 0 -> 100).
+    # created while the book was flat must keep the SAME IntentKey once the
+    # entry that follows it fills and `result.cycle_seq` moves on to a new
+    # cycle -- keying by `result.cycle_seq` instead re-keys it and reads as a
+    # brand-new order. Verified live with engine v1.0.0 on
+    # `ta-pivot-atr-stop-target-01`/the 15m ETH feed: `XL` (an ATR-stop EXIT
+    # bracket for the `Long` entry) is created flat at bar 2004 and the `Long`
+    # MARKET entry fills on bar 2005 (cycle_seq 0 -> 100). v1.0.0 stamps an
+    # order placed while flat with the last position cycle (99), not 0.
     spec = corpus_spec_bracket(); h = make_handle(test_so_bracket, spec); j, _ = open_journal(tmp_path)
     j.append_epoch(spec.epoch_hash(), "{}")
     L = Ledger(h, spec, j, "rc"); bars = load_bars(test_feed, 3000)
     s = L.seed(bars[:2001])
     for n in range(2001, 2005):
         s = L.settle(bars[n], 0)
-    assert s.bar_index == 2004 and s.position_size == 0.0
+    assert s.bar_index == 2004 and s.position_size == 0.0 and s.cycle_seq == 0
     book_2004 = B.settled_book(h, s)
-    xl = book_2004["XL|EXIT|Long|0"]
+    xl = book_2004["XL|EXIT|Long|99"]
     assert xl.level_resolved is False and not B.mirrorable(xl, s.position_size)   # unresolved: not yet mirrorable
 
     s = L.settle(bars[2005], 0)
-    assert s.bar_index == 2005 and s.position_size == 1.0 and s.cycle_seq != 0   # the entry filled, new cycle
+    assert s.bar_index == 2005 and s.position_size == 1.0 and s.cycle_seq == 100   # the entry filled, new cycle
     book_2005 = B.settled_book(h, s)
-    assert "XL|EXIT|Long|0" in book_2005                           # same key survives the cycle change
-    xl2 = book_2005["XL|EXIT|Long|0"]
+    assert "XL|EXIT|Long|99" in book_2005                          # same key survives the cycle change
+    xl2 = book_2005["XL|EXIT|Long|99"]
     assert xl2.level_resolved is True and B.mirrorable(xl2, s.position_size)     # now resolved and mirrorable
+    # Only the filled MARKET entry left the book. XL keeps its key; it reads
+    # MODIFIED, not a RESTING/CANCELLED pair, because v1.0.0's mirror reports
+    # its qty as the filled position once the entry fills.
+    assert (xl.qty, xl2.qty) == (None, 1.0)
     d = B.book_diff(book_2004, book_2005)
-    assert d.get("XL|EXIT|Long|0") is None                         # unchanged -- no RESTING/CANCELLED pair on it
-    assert d == {"Long|MARKET||0": B.IntentState.CANCELLED}        # only the filled MARKET entry left the book
+    assert d == {"Long|MARKET||99": B.IntentState.CANCELLED, "XL|EXIT|Long|99": B.IntentState.MODIFIED}
 
-    # Two bars later the ATR levels move (a same-id re-issue): the key is
-    # still stable, and the diff correctly reads MODIFIED, not a
-    # cancel+resting pair.
+    # Two bars later the ATR levels move (a same-id re-issue). v1.0.0
+    # replaces a re-issued order with a new one stamped with the cycle it is
+    # placed in, so the first re-issue after the fill moves XL to the new
+    # cycle's key: the diff reads a cancel+resting pair.
     s = L.settle(bars[2006], 0); book_2006 = B.settled_book(h, s)
     s = L.settle(bars[2007], 0); book_2007 = B.settled_book(h, s)
     d2 = B.book_diff(book_2006, book_2007)
-    assert d2 == {"XL|EXIT|Long|0": B.IntentState.MODIFIED}
+    assert d2 == {"XL|EXIT|Long|99": B.IntentState.CANCELLED, "XL|EXIT|Long|100": B.IntentState.RESTING}
+    # A re-issue within that cycle keeps the key and reads MODIFIED (bar 2043).
+    for n in range(2008, 2043):
+        s = L.settle(bars[n], 0)
+    book_2042 = B.settled_book(h, s)
+    s = L.settle(bars[2043], 0); book_2043 = B.settled_book(h, s)
+    assert B.book_diff(book_2042, book_2043) == {"XL|EXIT|Long|100": B.IntentState.MODIFIED}
 
 
 def test_dual_entry_path_names_match_the_engine_header(engine_root):

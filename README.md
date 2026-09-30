@@ -62,35 +62,47 @@ python -m pip install -e .
 
 For WebSocket feeds, also run `python -m pip install -e '.[websocket]'`.
 JSONL, stdin, HTTP and webhook delivery use the Python standard library.
-`pineforge-engine` supplies the compiled strategy; this package's runtime
-loads it with `ctypes`.
+The compiled strategy is a native library built with the C++
+[pineforge-engine](https://github.com/pineforge-4pass/pineforge-engine), which
+is not a Python package; this package's runtime loads it with `ctypes`.
 
 To build the public engine and its example strategy corpus:
 
 ```sh
 git lfs install
 git clone https://github.com/pineforge-4pass/pineforge-engine.git ../pineforge-engine
-git -C ../pineforge-engine checkout --detach 399eeadaa34cdbae0e30829f0a6c1dbe900cdfa0
+git -C ../pineforge-engine checkout --detach v1.0.0
 git -C ../pineforge-engine submodule update --init corpus
 git -C ../pineforge-engine/corpus lfs pull
 export PINEFORGE_ENGINE_ROOT="$(cd ../pineforge-engine && pwd)"
 scripts/build_engine.sh
 ```
 
-Use an ABI-v4 engine build. Two-input probe verification used engine revision
-`399eeadaa34cdbae0e30829f0a6c1dbe900cdfa0`. CMake 3.16+, a C++17 compiler and
-Git LFS are required; the corpus feed is an LFS object. Initial setup needs network
-access for the corpus data and engine build dependencies. The build script
-requires `PINEFORGE_ENGINE_ROOT` explicitly and compiles the public corpus,
-which can take several minutes. Keep the corpus revision pinned by the engine.
+Use engine release v1.0.0 (commit
+`5718c5dc05086fc5b66b4cb565617efe837131e3`), which provides ABI v4. All 152
+engine-backed tests pass with it and the demo below delivers its actions
+(checked on Linux arm64, 2026-09-30). Releases up to v0.13.1 provide ABI v3
+or older, and their strategy libraries are refused at load. CMake 3.16+, a
+C++17 compiler and Git LFS are required; the corpus feed is a 176 MB LFS
+object. Initial setup needs network access for the corpus data and engine
+build dependencies. The build script requires `PINEFORGE_ENGINE_ROOT`
+explicitly and compiles the public corpus, which can take several minutes.
+Keep the corpus revision pinned by the engine.
 
 For your own PineScript source, use
 [pineforge-codegen-oss](https://github.com/pineforge-4pass/pineforge-codegen-oss)
-to generate C++, then compile it against the ABI-v4 engine. The compiler is
-a separate source-available project with commercial-use restrictions; read
-the [license summary](#license) before using the compiler or its output in a
-product or service. The corpus demo uses already-generated C++ and does not
-run the PineScript compiler.
+(PyPI package `pineforge-codegen`) to generate C++, then compile it against
+the headers and `libpineforge.a` of the same engine build. A codegen 1.x
+release is supported only with the engine tag of the same version, so use
+codegen 1.0.0 with engine v1.0.0:
+`python -m pip install 'pineforge-codegen==1.0.0'`. Its output includes
+`pineforge/source/pine_strategy_host.hpp`, which engines before v1.0.0 do not
+have. Codegen 1.0.0 output for the corpus SMA and ATR bracket strategies,
+compiled this way, delivers the same webhook actions as the corpus libraries.
+The compiler is a separate source-available project with commercial-use
+restrictions; read the [license summary](#license) before using the compiler
+or its output in a product or service. The corpus demo uses already-generated
+C++ and does not run the PineScript compiler.
 
 ## Run a complete local example
 
@@ -276,15 +288,21 @@ tick paths through the same runner: 201 actual HTTP order-action deliveries,
 zero duplicate IDs and zero restart deliveries. Each tick path processed
 122,092 trade ticks. All probes matched C++ batch on identical reconstructed
 input; 27 also matched native chart OHLCV, while 8 had source-data differences.
-The report pins the tested code, inputs, reviews and artifact hashes.
+This measures live-versus-batch equivalence, not TradingView parity. The
+report pins the tested live, engine and codegen commits and the hashes of the
+inputs, container image and case artifacts; those artifacts, the image and
+the independent review are not public. It was recorded on 2026-09-09 with
+the pre-1.0 engine and codegen revisions it names, not with v1.0.0.
 
 ```sh
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[dev,websocket]'
 env -u PINEFORGE_ENGINE_ROOT python -m pytest
-PINEFORGE_ENGINE_ROOT=../pineforge-engine python -m pytest
+PINEFORGE_ENGINE_ROOT="$(cd ../pineforge-engine && pwd)" python -m pytest
 ```
 
-Without `PINEFORGE_ENGINE_ROOT`, engine-backed cases skip explicitly. Tests
+Without `PINEFORGE_ENGINE_ROOT`, engine-backed cases skip explicitly. Set it
+to an absolute path; a relative path fails the tests that write configuration
+files to temporary directories. Tests
 cover strategy-ledger identity, provisional updates, atomic restart, real
 loopback HTTP delivery, HMAC, duplicate delivery, receiver persistence, HTTP
 polling and WebSocket frames. The [work ledger](ledger.md) records exact
@@ -304,8 +322,12 @@ that earlier development track.
 | `pineforge_live/sources/` | Normalized stdin/JSONL/HTTP/WebSocket feeds |
 | `pineforge_live/config.py` | Strategy, metadata, feed and webhook configuration |
 | `pineforge_live/engine/` | PineForge ABI binding and full backtest calls |
+| `pineforge_live/bars/` | Bar building, 1m aggregation and session calendars |
+| `pineforge_live/adapters/` | `mock-feed` generation, recorded tapes and the offline mock venue |
 | `pineforge_live/core/` | Ledger/probe and existing reconciliation research |
+| `pineforge_live/execution/`, `pineforge_live/drivers/` | Earlier mock-execution research ([docs/execution.md](docs/execution.md)) |
 | `pineforge_live/journal/` | Durable state, STOP marker and writer fencing |
+| `pineforge_live/verification/`, `cloudrun/` | Maintainer campaign verification tooling |
 | `examples/webhook_receiver.py` | Minimal durable receiver for integration |
 
 PineForge engine/codegen feature support and TradingView parity are separate
@@ -318,8 +340,10 @@ execution acknowledgments belong to your receiver or broker bridge.
 Bug reports, documentation fixes, feed adapters and replay cases are welcome.
 Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests, PR scope and
 contribution licensing. The [changelog](CHANGELOG.md) tracks release changes.
-Maintainer campaign tooling is separate; cloud access is not required to use
-the runtime or submit a contribution.
+Maintainer campaign tooling (`cloudrun/`, `pineforge_live/verification/`,
+`scripts/export_campaign.mjs`) ships in this repository but needs private
+repositories and cloud storage; neither is required to use the runtime or
+submit a contribution.
 
 ## Security reports
 

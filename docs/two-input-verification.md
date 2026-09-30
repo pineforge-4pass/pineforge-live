@@ -33,7 +33,8 @@ calendar hashes and generation-pinned case artifact receipts.
 
 The selection was frozen from a read-only Postgres campaign export: two probes
 per lane/group with seed `20260909`, plus SMA, bracket and orders-on-close
-regressions. It covers 35 of the 4,190 recorded probes across nine symbols.
+regressions. It covers 35 of the 4,190 probes recorded at the time, across
+nine symbols.
 Probe IDs, original source/CSV bytes, strategy inputs, engine and compiler
 versions remained fixed through the verification attempts.
 

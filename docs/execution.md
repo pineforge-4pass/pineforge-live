@@ -17,7 +17,7 @@ or claim an account P&L model.
 
 ## Run it
 
-Use the same ABI-v4 engine and derived feed as the README's L1 quickstart.
+Use the ABI-v4 engine build and derived feed from the README's Install section.
 Each run requires a fresh journal directory; reports preserve their input
 library/feed digests and epoch identity.
 
@@ -95,6 +95,13 @@ the account basis once; no replacement engine fill is invented for bar n+1.
 Late ledger receipts, terminal partial residuals and uncertain absent orders
 remain explicit unresolved facts. Automatic remainder/chunk submission and
 exhaustive NOT_FOUND recovery require further adapter contracts.
+
+An entry without a resolved Pine order id (`?`) is refused before any order
+of its decision is placed. A `process_orders_on_close` entry that fills at the
+close of the bar that placed it never rests in the settled book, so it has no
+id. With engine v1.0.0, each orders-on-close close of the corpus probe
+`order-deferred-flip-pooc-cross-bar-01` in bars 2000-2199 comes with such an
+entry (a same-bar flip), so its replay stops at the first one.
 
 ## STOP recovery
 

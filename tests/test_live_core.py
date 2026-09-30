@@ -219,6 +219,22 @@ def test_settled_market_entry_becomes_a_close_and_an_open_leg(core):
     assert [(a.intent, a.side, a.qty, a.reduce_only, a.target_bar_index) for a in mkt] == [
         ("L", T.Side.BUY, 1.0, True, 2001), ("L", T.Side.BUY, 1.0, False, 2001)]
 
+def test_a_resting_stop_entry_gets_no_market_leg(test_so_dual_stop, test_feed, tmp_path):
+    """Engine v1.0.0 reports every strategy.entry as ENTRY; only one with
+    neither a limit nor a stop level is a market entry (`ids.intent_kind`).
+    `order-dual-stop-far-only-01` places a long and a short stop entry while
+    flat; on the 15m ETH feed both rest after bar 2076 (verified live). They
+    must stay priced ENTRY intents: read as MARKET, both would go to the
+    venue at the next open as market orders."""
+    c, j = _core(test_so_dual_stop, tmp_path, breakers=[])
+    bars = load_bars(test_feed, 2077)
+    assert c.seed(bars[:2076]).settle is not None
+    out = c.settle(bars[2076], [], set(), set(), 0.0, 0)
+    assert out.settle.position_size == 0.0
+    assert sorted((it.key.order_id, it.kind, it.is_market, it.stop is not None, it.limit) for it in out.book.values()) == [
+        ("LE", "ENTRY", False, True, None), ("SE", "ENTRY", False, True, None)]
+    assert [a for a in out.actions if a.kind == "MARKET_AT_OPEN"] == [] and c.pending_market == {}
+
 def test_a_settled_market_is_requested_once_not_again_by_the_probe(core):
     """`[r4]` one open action per intent: the MARKET_AT_OPEN settle(n)
     emitted for bar n+1 stands as the advance, and the probe's own fill of

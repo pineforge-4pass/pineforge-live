@@ -1,19 +1,22 @@
 """Trade identity (spec §4) and intent keys."""
 from __future__ import annotations
 import dataclasses
+import math
 from dataclasses import dataclass
 from typing import Sequence
 from pineforge_live.types import canonical_sha256
 from pineforge_live.engine.report import TradeRow
 
-# Member names of `enum class OrderType { MARKET, ENTRY, EXIT, RAW_ORDER };`
-# in ~/code/pineforge-engine-wt/main/include/pineforge/engine.hpp, in
-# declaration order (no explicit values assigned, so position == code).
+# The pending-order mirror's `type` codes, by position: the engine's former
+# `enum class OrderType { MARKET, ENTRY, EXIT, RAW_ORDER }`. Engine v1.0.0
+# keeps the codes but drops the enum: `mirror_order_type` in
+# src/source/pine_adapter.cpp maps each Pine order family to one of them.
 ORDER_TYPE_NAMES: tuple[str, ...] = ("MARKET", "ENTRY", "EXIT", "RAW_ORDER")
 
 # Names that denote an entry order. Derived from ORDER_TYPE_NAMES: anything
-# containing "ENTRY". IntentKey.kind stores the raw enum name (never
-# translated to "ENTRY"/"EXIT"); this is how callers classify it.
+# containing "ENTRY". IntentKey.kind stores the enum name (never translated
+# to "ENTRY"/"EXIT"; see `intent_kind` for the one MARKET case); this is how
+# callers classify it.
 ENTRY_KINDS: frozenset[str] = frozenset(n for n in ORDER_TYPE_NAMES if "ENTRY" in n)
 
 
@@ -129,10 +132,28 @@ class IntentKey:
         return cls(_unescape(o), k, _unescape(f), int(c))
 
 
+def intent_kind(po: dict) -> str:
+    """The `IntentKey.kind` of one engine pending-order mirror row `po`: its
+    `type` name, except that an ENTRY with neither a limit nor a stop level
+    is a MARKET entry.
+
+    Engine v1.0.0 reports every `strategy.entry` as ENTRY, market or priced;
+    the ABI-v4 engine before it reported a market entry as MARKET. The
+    mirror's `limit_price`/`stop_price` are the requested levels, NaN when
+    absent, so the market entry is found the same way on both and keeps the
+    MARKET kind that `Intent.is_market` (LiveCore's `MARKET_AT_OPEN` legs)
+    reads. Both fields are read strictly: a mirror without them must fail
+    loudly, not turn every priced entry into a market order."""
+    kind = order_type_name(int(po["type"]))
+    if kind == "ENTRY" and math.isnan(po["limit_price"]) and math.isnan(po["stop_price"]):
+        return "MARKET"
+    return kind
+
+
 def intent_key_for(po: dict, cycle_seq: int) -> IntentKey:
     """`IntentKey` for one engine pending-order mirror row `po`, tagged with
     the settlement's `cycle_seq` (the position cycle it was created under)."""
-    return IntentKey(po["id"], order_type_name(int(po["type"])), po.get("from_entry", ""), int(cycle_seq))
+    return IntentKey(po["id"], intent_kind(po), po.get("from_entry", ""), int(cycle_seq))
 
 
 def keys_sha256(keys: Sequence[TradeKey]) -> str:
