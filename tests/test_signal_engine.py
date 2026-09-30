@@ -36,11 +36,16 @@ def test_settled_signals_equal_backtest_fill_sequence(request,fixture,test_feed,
         result=engine.settle(bar,bar.ts_open+900_000)
         assert result.completed
         for f in emulated_from_settle(engine.ledger.last,book_diff(previous.book,engine.ledger.last.book),previous.book):
-            expected.append((f.bar_index,f.intent,f.leg.lower(),f.qty,f.price))
+            # A fill no single Pine order can be named for is sent with a
+            # null id (docs/webhooks.md). With engine v1.0.0 the POOC probe's
+            # flip entries fill at the close they are placed on, never rest,
+            # and so reach the webhook this way.
+            expected.append((f.bar_index,None if f.intent in ('?','') else f.intent,f.leg.lower(),f.qty,f.price))
     actual=[(r['payload']['bar']['index'],r['payload']['order']['id'],r['payload']['order']['leg'],
              r['payload']['order']['contracts'],r['payload']['order']['price']) for r in engine.outbox.inspect()]
     assert actual==expected
     assert all(r['payload']['event']=='order_action' and r['payload']['status']=='confirmed' for r in engine.outbox.inspect())
+    assert all(r['payload']['order']['identity_resolved']==(r['payload']['order']['id'] is not None) for r in engine.outbox.inspect())
     engine.h.close();engine.j.close()
 
 

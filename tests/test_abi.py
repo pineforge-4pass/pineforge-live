@@ -104,20 +104,32 @@ def test_accessors_valid_after_run(test_so, test_feed):
         assert rc == 0  # a live entry order fills (rc=0) at the close price (verified)
 
 def test_abort_returns_not_completed(test_so, test_feed):
-    # Full feed (~222k bars); run_backtest_full itself takes ~29ms. Building the
-    # BarC array first takes ~110ms, so a timer armed before run_full() would
-    # fire (and be discarded by the engine, which is idle) long before the run
-    # starts. Arm it instead at run entry by wrapping the bound C function, so
-    # the 3ms delay lands inside the ~29ms run and the abort is observable.
+    # Full feed (~222k bars). Building the BarC array first takes ~110ms, so
+    # a request made before run_full() reaches the C call would be discarded
+    # by the idle engine. Engine v1.0.0 also discards a request that arrives
+    # inside the C call before the run begins: it copies and checks the bars
+    # first (more than 3ms for this feed in a fresh process), then consumes
+    # any pending request. So request the abort repeatedly from the C call's
+    # entry until it returns; a request made after the run begins is observed.
     bars = load_bars(test_feed)
     with EngineHandle(test_so) as h:
         original_run = h.lib.run_backtest_full
+        returned = threading.Event()
 
-        def run_and_arm_abort(*args, **kwargs):
-            threading.Timer(0.003, h.request_abort).start()
-            return original_run(*args, **kwargs)
+        def request_until_returned():
+            while not returned.wait(0.0005):
+                h.request_abort()
 
-        h.lib.run_backtest_full = run_and_arm_abort
+        def run_and_request_abort(*args, **kwargs):
+            requester = threading.Thread(target=request_until_returned)
+            requester.start()
+            try:
+                return original_run(*args, **kwargs)
+            finally:
+                returned.set()
+                requester.join()
+
+        h.lib.run_backtest_full = run_and_request_abort
         r = h.run_full(bars, "15")
         h.lib.run_backtest_full = original_run  # restore (keeps its argtypes/restype)
         assert r.status == 1

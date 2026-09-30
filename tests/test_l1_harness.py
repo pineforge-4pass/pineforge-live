@@ -246,7 +246,11 @@ def test_l1_harness_on_the_pooc_probe_has_no_missed_fill(test_so_pooc, test_feed
 
     The fixture is `order-deferred-flip-pooc-cross-bar-01`
     (`process_orders_on_close=true`: the `strategy.close` fires at the
-    cross bar's own close while the stop entry waits for the next open).
+    cross bar's own close). With engine v1.0.0 the opposite stop entry
+    fills at that same close, as it does in TradingView's trade list, so
+    each POOC bar is a flip: both legs are settle-only fills. The entry
+    never rested in the settled book, so no Pine order id reaches the
+    runtime and its `MARKET_NOW` carries `"?"`.
     Same 15m ETH-USDT feed and `"TAPE"` syminfo as the other two probes --
     its directory carries no `inputs.json` at all. 200 bars from 2000,
     the same window as the release-criterion runs."""
@@ -261,10 +265,10 @@ def test_l1_harness_on_the_pooc_probe_has_no_missed_fill(test_so_pooc, test_feed
     classes = [cls for b in doc["bars"] for cls in b["non_confirmed"]]
     assert classes and set(classes) == {"SETTLE_ONLY"}, classes      # zero MISSED over the window
     pooc_bars = [b for b in doc["bars"] if b["non_confirmed"]]
-    assert len(pooc_bars) == 4                                       # the four POOC closes in this window
+    assert len(pooc_bars) == 4                                       # the four POOC flips in this window
     for b in pooc_bars:
-        assert [(a["kind"], a["reduce_only"], a["target_bar_index"]) for a in b["actions"]] == \
-               [("MARKET_NOW", True, b["bar_index"])]
+        assert [(a["kind"], a["reduce_only"], a["intent"] == "?", a["target_bar_index"]) for a in b["actions"]] == \
+               [("MARKET_NOW", True, False, b["bar_index"]), ("MARKET_NOW", False, True, b["bar_index"])]
 
 
 def _harness_module():
