@@ -17,7 +17,7 @@ or claim an account P&L model.
 
 ## Run it
 
-Use the same ABI-v4 engine and derived feed as the README's L1 quickstart.
+Use the ABI-v4 engine build and derived feed from the README's Install section.
 Each run requires a fresh journal directory; reports preserve their input
 library/feed digests and epoch identity.
 

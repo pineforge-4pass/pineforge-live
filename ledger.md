@@ -1,5 +1,9 @@
 # pineforge-live work ledger
 
+This development log was written before the repository was published on
+2026-09-09 (v0.1.0). Each entry describes the state on its date; "no push"
+statements predate publication.
+
 ## Current public contract — broker-neutral webhooks (2026-09-09)
 
 The user clarified that this repository is OSS and each strategy order action
@@ -91,12 +95,12 @@ and both Grok reviews are saved in
 
 ## Historical work before the webhook clarification
 
-## Continuation of Claude session 08f941f2-ec0e-4df3-aada-eaef4778b971
+## Continuation of an earlier development session
 
 Recovered baseline: B2 completed at `1255ef4`; OSS README committed as
 `1a3a6fb`. The earlier session's final TODO list is in the sibling
-`pineforge-workflow-live` B2 ledger. The latest user instruction there was
-**do not push**. At that recovered checkpoint, work remained local; no
+`pineforge-workflow-live` B2 ledger, which is not published. The latest user
+instruction there was **do not push**. At that recovered checkpoint, work remained local; no
 repository, release, exchange order or deployment had been created. The later
 isolated Cloud Run verification jobs are recorded above.
 
