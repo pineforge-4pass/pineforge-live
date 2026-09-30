@@ -62,6 +62,8 @@ class Intent:
         # Controller ruling: the settled book's MARKET intents are what
         # LiveCore turns into MARKET_AT_OPEN requests (spec §4 settle 5) --
         # distinct from is_entry, which stays strict to kind=="ENTRY".
+        # `ids.intent_kind` gives a market strategy.entry this kind on engine
+        # v1.0.0 too, where the mirror reports it as ENTRY without levels.
         return self.kind == "MARKET"
     @property
     def pure_stop(self) -> bool: return self.stop is not None and self.limit is None

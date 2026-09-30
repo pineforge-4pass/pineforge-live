@@ -51,13 +51,50 @@ def test_intent_key_parse_raises_on_wrong_arity():
         ids.IntentKey.parse("a|b|ENTRY||7")
 
 
-def test_order_type_names_match_engine_header(engine_root):
-    hdr = (engine_root / "include/pineforge/engine.hpp").read_text()
-    m = re.search(r"enum class OrderType\s*(?::\s*\w+)?\s*\{([^}]*)\}", hdr)
-    assert m, "OrderType enum not found in engine.hpp"
-    names = [n.strip().split("=")[0].strip() for n in m.group(1).split(",") if n.strip() and not n.strip().startswith("//")]
-    for code, name in enumerate(names):
-        assert ids.order_type_name(code) == name
+def test_order_type_codes_match_the_engine_mirror_projection(engine_root):
+    # Engine v1.0.0 has no `enum class OrderType` in its headers: the
+    # pending-order mirror's `type` code comes from `mirror_order_type` in
+    # src/source/pine_adapter.cpp, one code per Pine order family. The codes
+    # are the old enum positions; every strategy.entry is now ENTRY, market or
+    # not, and MARKET (0) is left to engine margin/risk orders.
+    families = (engine_root / "include/pineforge/source/pine_adapter.hpp").read_text()
+    m = re.search(r"enum class PineOrderFamily\s*(?::\s*[\w:]+)?\s*\{([^}]*)\}", families)
+    assert m, "PineOrderFamily enum not found in source/pine_adapter.hpp"
+    members = {n.split("=")[0].strip() for n in m.group(1).split(",") if n.strip()}
+    src = (engine_root / "src/source/pine_adapter.cpp").read_text()
+    m = re.search(r"int mirror_order_type\(PineOrderFamily family\)[^{]*\{(.*?)\n\}", src, re.S)
+    assert m, "mirror_order_type not found in src/source/pine_adapter.cpp"
+    codes, labels = {}, []
+    for family, code in re.findall(r"case PineOrderFamily::(\w+):(?:\s*return (\d+);)?", m.group(1)):
+        labels.append(family)
+        if code:
+            codes.update((f, int(code)) for f in labels)
+            labels = []
+    assert set(codes) == members
+    assert {f: ids.order_type_name(c) for f, c in codes.items()} == {
+        "Entry": "ENTRY", "Order": "RAW_ORDER", "Close": "EXIT", "CloseAll": "EXIT", "ExitLimit": "EXIT",
+        "ExitStop": "EXIT", "ExitTrail": "EXIT", "Margin": "MARKET", "Risk": "MARKET"}
+
+
+def _mirror_row(code, limit=float("nan"), stop=float("nan")):
+    return {"id": "L", "type": code, "from_entry": "", "limit_price": limit, "stop_price": stop}
+
+
+def test_an_entry_without_limit_or_stop_is_keyed_as_a_market_entry():
+    # Engine v1.0.0 reports every strategy.entry as ENTRY; the ABI-v4 engine
+    # before it reported a market entry as MARKET. The mirror's limit_price
+    # and stop_price are the requested levels (NaN when absent), so an entry
+    # with neither is the market entry and keeps its MARKET key either way.
+    assert ids.intent_key_for(_mirror_row(1), 7).s == "L|MARKET||7"
+    assert ids.intent_key_for(_mirror_row(0), 7).s == "L|MARKET||7"
+    assert ids.intent_key_for(_mirror_row(1, limit=99.5), 7).s == "L|ENTRY||7"
+    assert ids.intent_key_for(_mirror_row(1, stop=101.0), 7).s == "L|ENTRY||7"
+    assert ids.intent_key_for(_mirror_row(1, limit=99.5, stop=101.0), 7).s == "L|ENTRY||7"
+    # Only an entry is reclassified: a level-less exit or strategy.order keeps its kind.
+    assert ids.intent_key_for(_mirror_row(2), 7).kind == "EXIT"
+    assert ids.intent_key_for(_mirror_row(3), 7).kind == "RAW_ORDER"
+    with pytest.raises(KeyError):   # a mirror without the level fields must fail loudly
+        ids.intent_key_for({"id": "L", "type": 1, "from_entry": ""}, 7)
 
 
 def test_entry_kinds_are_nonempty_subset_of_order_type_names():

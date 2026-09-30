@@ -178,7 +178,9 @@ def test_settled_book_from_engine(test_so, test_feed, tmp_path):
     # `settled_book` now reads strictly (po[...], not po.get(...)) -- a
     # mirror rename must fail this test loudly, not silently mirror a
     # half-position close as closePosition=true.
-    for field in ("qty", "qty_percent", "requested_partial", "full_percent_exit_request"):
+    # `ids.intent_kind` reads limit_price/stop_price strictly to find a
+    # market entry, so pin those two as well.
+    for field in ("qty", "qty_percent", "requested_partial", "full_percent_exit_request", "limit_price", "stop_price"):
         assert field in s.pending_orders[0]
     bk = B.settled_book(h, s)
     assert len(bk) == len(s.pending_orders) >= 1
