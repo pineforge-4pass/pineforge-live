@@ -78,13 +78,17 @@ export PINEFORGE_ENGINE_ROOT="$(cd ../pineforge-engine && pwd)"
 scripts/build_engine.sh
 ```
 
-Use the pinned ABI-v4 engine revision. No engine release provides ABI v4 yet:
-v0.13.1, the latest release, is ABI v3, and its strategy libraries are refused
-at load. The pin `399eeadaa34cdbae0e30829f0a6c1dbe900cdfa0` is on the
-engine's `main` branch, 111 commits after v0.13.1; two-input probe
-verification used it, and all engine-backed tests pass with it. ABI v4 alone
-is not sufficient: at engine `main` `35db01c8` (2026-09-29) the demo ran, but
-21 engine-backed tests failed. CMake 3.16+, a C++17 compiler and Git LFS are
+Use the pinned engine revision. The pin
+`399eeadaa34cdbae0e30829f0a6c1dbe900cdfa0` is an unreleased ABI-v4 commit on
+the engine's `main` branch, 111 commits after v0.13.1 and before v1.0.0;
+two-input probe verification used it, and all engine-backed tests pass with
+it. **Engine v1.0.0 support is pending.** v1.0.0, the latest release, also
+provides ABI v4 and the demo below runs against it, but 22 of the 151
+engine-backed tests fail with it (checked on Linux arm64, 2026-09-30). The
+runtime loads v1.0.0 strategy libraries without error, so build against the
+pin until support lands.
+Releases up to v0.13.1 provide ABI v3 or older, and their strategy libraries
+are refused at load. CMake 3.16+, a C++17 compiler and Git LFS are
 required; the corpus feed is a 176 MB LFS object. Initial setup needs network
 access for the corpus data and engine build dependencies. The build script
 requires `PINEFORGE_ENGINE_ROOT` explicitly and compiles the public corpus,
@@ -92,10 +96,15 @@ which can take several minutes. Keep the corpus revision pinned by the engine.
 
 For your own PineScript source, use
 [pineforge-codegen-oss](https://github.com/pineforge-4pass/pineforge-codegen-oss)
-to generate C++, then compile it against the ABI-v4 engine. The recorded
+to generate C++, then compile it against the pinned engine. The recorded
 verification paired the engine revision above with codegen revision
-`0fe2189f2cb845cc7371ce56dd55ad9cff72dda0`, on codegen's `main` branch three
-commits after v0.10.4. The compiler is
+`0fe2189f2cb845cc7371ce56dd55ad9cff72dda0`, three commits after v0.10.4 and
+before v1.0.0; install it with
+`python -m pip install 'git+https://github.com/pineforge-4pass/pineforge-codegen-oss@0fe2189f2cb845cc7371ce56dd55ad9cff72dda0'`.
+Codegen 1.0.0 output does not compile against the pinned
+engine: it includes `pineforge/source/pine_strategy_host.hpp`, which the
+engine added after the pin, and codegen 1.0.0 is supported only with engine
+v1.0.0. The compiler is
 a separate source-available project with commercial-use restrictions; read
 the [license summary](#license) before using the compiler or its output in a
 product or service. The corpus demo uses already-generated C++ and does not
