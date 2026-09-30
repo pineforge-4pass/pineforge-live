@@ -1,5 +1,15 @@
 # pineforge-live
 
+> [!WARNING]
+> **Deprecated.** This Python runner is no longer developed. Live trading support now ships in
+> [pineforge-engine](https://github.com/pineforge-4pass/pineforge-engine) itself: the optional native
+> `pineforge-live` executable (C++17, built with `-DPINEFORGE_BUILD_LIVE_RUNNER=ON`) runs a strategy from
+> historical warmup into a realtime tick or bar stream on the same instance, with durable order-action
+> webhooks, custom feed parsers and SQLite recovery. Start with its
+> [runner guide](https://github.com/pineforge-4pass/pineforge-engine/blob/main/runner/README.md) and the
+> [streaming guide](https://github.com/pineforge-4pass/pineforge-engine/blob/main/docs/pages/streaming.md).
+> This repository stays readable as a record; it supports engine 0.x only and was never published to PyPI.
+
 Run PineForge-compiled PineScript strategies on your own machine and send
 the engine's simulated fill actions to a webhook. Connect the webhook to your
 own broker bridge, automation platform or application.
